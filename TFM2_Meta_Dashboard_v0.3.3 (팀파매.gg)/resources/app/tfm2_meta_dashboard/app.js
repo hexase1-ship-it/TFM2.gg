@@ -31,6 +31,37 @@ const championTabs = [
 const patches = [["all", "전체 패치"], ...(DATA.patches || []).map((version) => [version, version])];
 const defaultPatch = DATA.patches?.length ? DATA.patches[DATA.patches.length - 1] : "all";
 
+const tierPresets = [
+  ["classic", "클래식", { win: 1, pick: 0.2, ban: 0.2 }],
+  ["fearless", "피어리스", { win: 1, pick: 0.18, ban: 0.55 }],
+  ["hardFearless", "하드 피어리스", { win: 1, pick: 0.15, ban: 0.85 }],
+];
+
+const sampleModes = [
+  ["auto", "자동 표본"],
+  ["early", "초반 5픽"],
+  ["normal", "일반 10픽"],
+];
+
+const tierPresetById = Object.fromEntries(tierPresets.map(([id, label, weights]) => [id, { id, label, weights }]));
+
+function readStoredSetting(key, fallback, allowed) {
+  try {
+    const value = window.localStorage?.getItem(key);
+    return allowed.includes(value) ? value : fallback;
+  } catch (_err) {
+    return fallback;
+  }
+}
+
+function writeStoredSetting(key, value) {
+  try {
+    window.localStorage?.setItem(key, value);
+  } catch (_err) {
+    // localStorage can be unavailable in restricted webviews.
+  }
+}
+
 const state = {
   view: "list",
   scope: "overall",
@@ -38,6 +69,8 @@ const state = {
   patch: defaultPatch,
   search: "",
   sort: "tier",
+  tierPreset: readStoredSetting("tfm2:tierPreset", "classic", tierPresets.map(([id]) => id)),
+  sampleMode: readStoredSetting("tfm2:sampleMode", "auto", sampleModes.map(([id]) => id)),
   matchSearch: "",
   matchDate: "all",
   championTab: "overview",
@@ -48,6 +81,7 @@ const state = {
 const championById = new Map(DATA.champions.map((champ) => [champ.id, champ]));
 const roleLabels = Object.fromEntries(roles);
 const scopeLabels = Object.fromEntries(scopes);
+let metaTierCache = null;
 
 function scopedStats() {
   if (state.patch !== "all") {
@@ -91,12 +125,13 @@ function roleTotalMatches(scope = state.scope, role = state.role) {
 }
 
 function displayStatOf(id) {
-  const stat = statOf(id);
+  const stat = { ...statOf(id), championId: id };
   if (state.role === "all") return stat;
   const roleRow = stat.byPosition?.[state.role];
   if (!roleRow || !roleRow.matches) {
     return {
       ...stat,
+      championId: id,
       pickCount: 0,
       wins: 0,
       losses: 0,
@@ -122,6 +157,7 @@ function displayStatOf(id) {
   const banRate = stat.banRate ?? null;
   return {
     ...stat,
+    championId: id,
     pickCount: matches,
     wins,
     losses: Math.max(0, matches - wins),
@@ -181,19 +217,185 @@ function perGame(total, games) {
   return (Number(total || 0) / count).toFixed(1);
 }
 
-function calculatedTier(stat) {
+function clamp(value, min, max) {
+  return Math.min(max, Math.max(min, value));
+}
+
+function round1(value) {
+  return Math.round(value * 10) / 10;
+}
+
+function currentTierPreset() {
+  return tierPresetById[state.tierPreset] || tierPresetById.classic;
+}
+
+function replayDateInferenceInfo() {
+  return DATA.replayDateInference || DATA.sources?.replayDateInference || {};
+}
+
+function scopedSampleVolume() {
+  const stats = Object.values(scopedStats());
+  const totalMatches = roleTotalMatches();
+  const totalPicks = stats.reduce((sum, row) => {
+    if (state.role === "all") return sum + Number(row.pickCount || 0);
+    return sum + Number(row.byPosition?.[state.role]?.matches || 0);
+  }, 0);
+  const estimatedMatches = state.role === "all" ? totalPicks / 10 : totalPicks / 2;
+  return Math.max(totalMatches, estimatedMatches);
+}
+
+function effectiveSampleInfo() {
+  if (state.sampleMode === "early") {
+    return { minSample: 5, mode: "early", label: "초반 5픽", reason: "manual" };
+  }
+  if (state.sampleMode === "normal") {
+    return { minSample: 10, mode: "normal", label: "일반 10픽", reason: "manual" };
+  }
+
+  const replayInfo = replayDateInferenceInfo();
+  const daysSincePatch =
+    replayInfo.daysSincePatch === null || replayInfo.daysSincePatch === undefined
+      ? null
+      : Number(replayInfo.daysSincePatch);
+  if (Number.isFinite(daysSincePatch)) {
+    return daysSincePatch >= 3
+      ? { minSample: 10, mode: "normal", label: "자동: 일반 10픽", reason: `${daysSincePatch}일 경과` }
+      : { minSample: 5, mode: "early", label: "자동: 초반 5픽", reason: `${daysSincePatch}일 경과` };
+  }
+
+  const matchCount = scopedSampleVolume();
+  return matchCount >= 100
+    ? { minSample: 10, mode: "normal", label: "자동: 일반 10픽", reason: `${fmt(matchCount)}경기` }
+    : { minSample: 5, mode: "early", label: "자동: 초반 5픽", reason: `${fmt(matchCount)}경기` };
+}
+
+function metaScoreForStat(stat, sampleInfo = effectiveSampleInfo()) {
+  const preset = currentTierPreset();
+  const weights = preset.weights;
   const sample = Number(stat.pickCount || 0);
-  const winRate = stat.winRate;
-  if (sample < 5 || winRate === null || winRate === undefined) return "-";
-  if (winRate >= 62) return "OP";
-  if (winRate >= 57) return "1";
-  if (winRate >= 53) return "2";
-  if (winRate >= 49) return "3";
+  const rawWinRate = Number(stat.winRate);
+  const minSample = sampleInfo.minSample;
+  if (!Number.isFinite(rawWinRate) || sample < minSample) {
+    return {
+      eligible: false,
+      tier: "-",
+      score: null,
+      sample,
+      minSample,
+      preset: preset.label,
+      reason: !Number.isFinite(rawWinRate) ? "승률 없음" : `표본 ${sample}/${minSample}`,
+    };
+  }
+
+  const pickRate = clamp(Number(stat.pickRate || 0), 0, 100);
+  const banRate = clamp(Number(stat.banRate || 0), 0, 100);
+  const confidence = clamp(sample / Math.max(minSample * 2, 12), 0, 1);
+  const adjustedWinRate = round1(50 + (rawWinRate - 50) * confidence);
+  const totalWeight = weights.win + weights.pick + weights.ban;
+  const weighted =
+    (adjustedWinRate * weights.win + pickRate * weights.pick + banRate * weights.ban) /
+    Math.max(0.01, totalWeight);
+  const lowWinPenalty = Math.max(0, 45 - rawWinRate) * 0.8;
+  const score = round1(clamp(weighted - lowWinPenalty, 0, 100));
+
+  return {
+    eligible: true,
+    tier: "4",
+    score,
+    sample,
+    minSample,
+    preset: preset.label,
+    winRate: rawWinRate,
+    adjustedWinRate,
+    pickRate,
+    banRate,
+    weights,
+    lowWinPenalty: round1(lowWinPenalty),
+  };
+}
+
+function tierForMetaRank(entry, index, total) {
+  if (!entry.eligible || entry.score === null || !total) return "-";
+  const percentile = (index + 1) / total;
+  if (entry.score >= 58 && percentile <= 0.08) return "OP";
+  if (entry.score >= 52 && percentile <= 0.22) return "1";
+  if (entry.score >= 48 && percentile <= 0.45) return "2";
+  if (entry.score >= 43 && percentile <= 0.7) return "3";
   return "4";
 }
 
+function metaTierCacheKey() {
+  return [state.scope, state.patch, state.role, state.tierPreset, state.sampleMode, DATA.generatedAt || ""].join("|");
+}
+
+function buildMetaTierCache() {
+  const sampleInfo = effectiveSampleInfo();
+  const map = new Map();
+  const rows = DATA.champions.map((champ) => {
+    const stat = displayStatOf(champ.id);
+    const entry = {
+      championId: champ.id,
+      championName: champ.name,
+      ...metaScoreForStat(stat, sampleInfo),
+      winRate: stat.winRate,
+      pickCount: Number(stat.pickCount || 0),
+    };
+    map.set(champ.id, entry);
+    return entry;
+  });
+  const eligible = rows
+    .filter((entry) => entry.eligible)
+    .sort(
+      (a, b) =>
+        Number(b.score || -1) - Number(a.score || -1) ||
+        Number(b.winRate || -1) - Number(a.winRate || -1) ||
+        Number(b.pickCount || 0) - Number(a.pickCount || 0) ||
+        a.championName.localeCompare(b.championName, "ko")
+    );
+  eligible.forEach((entry, index) => {
+    entry.rank = index + 1;
+    entry.eligibleCount = eligible.length;
+    entry.tier = tierForMetaRank(entry, index, eligible.length);
+  });
+  metaTierCache = { key: metaTierCacheKey(), map, sampleInfo, eligibleCount: eligible.length };
+  return metaTierCache;
+}
+
+function metaTierInfo(stat) {
+  if (!metaTierCache || metaTierCache.key !== metaTierCacheKey()) {
+    buildMetaTierCache();
+  }
+  if (!stat?.championId) {
+    return metaScoreForStat(stat || {}, metaTierCache.sampleInfo);
+  }
+  return metaTierCache.map.get(stat.championId) || metaScoreForStat(stat, metaTierCache.sampleInfo);
+}
+
 function displayTier(stat) {
-  return state.role === "all" ? stat.tier || calculatedTier(stat) : calculatedTier(stat);
+  return metaTierInfo(stat).tier || "-";
+}
+
+function tierClass(tier) {
+  if (tier === "OP") return "tier-op";
+  if (["1", "2", "3"].includes(tier)) return `tier-${tier}`;
+  return "tier-default";
+}
+
+function scoreLabel(info) {
+  return info?.score === null || info?.score === undefined ? "-" : info.score.toFixed(1);
+}
+
+function scoreTitle(info) {
+  if (!info?.eligible) {
+    return info?.reason || "표본 부족";
+  }
+  return [
+    `${info.preset} 점수 ${scoreLabel(info)}`,
+    `보정 승률 ${info.adjustedWinRate}%`,
+    `픽률 ${info.pickRate}%`,
+    `밴률 ${info.banRate}%`,
+    `표본 ${info.sample}/${info.minSample}`,
+  ].join(" · ");
 }
 
 function roleLabel(role) {
@@ -241,10 +443,21 @@ function filteredChampions() {
 function compareChampions(a, b) {
   const as = displayStatOf(a.id);
   const bs = displayStatOf(b.id);
+  const am = metaTierInfo(as);
+  const bm = metaTierInfo(bs);
   if (state.sort === "name") return a.name.localeCompare(b.name, "ko");
   if (state.sort === "tier") {
     return (
-      tierRank(displayTier(as)) - tierRank(displayTier(bs)) ||
+      tierRank(am.tier) - tierRank(bm.tier) ||
+      Number(bm.score ?? -1) - Number(am.score ?? -1) ||
+      Number(bs.winRate || -1) - Number(as.winRate || -1) ||
+      Number(bs.pickCount || 0) - Number(as.pickCount || 0) ||
+      a.name.localeCompare(b.name, "ko")
+    );
+  }
+  if (state.sort === "metaScore") {
+    return (
+      Number(bm.score ?? -1) - Number(am.score ?? -1) ||
       Number(bs.winRate || -1) - Number(as.winRate || -1) ||
       Number(bs.pickCount || 0) - Number(as.pickCount || 0) ||
       a.name.localeCompare(b.name, "ko")
@@ -606,6 +819,18 @@ function renderControls() {
   patchSelect.innerHTML = patches
     .map(([value, label]) => `<option value="${value}" ${state.patch === value ? "selected" : ""}>${label}</option>`)
     .join("");
+  const tierPresetSelect = document.getElementById("tierPresetSelect");
+  if (tierPresetSelect) {
+    tierPresetSelect.innerHTML = tierPresets
+      .map(([value, label]) => `<option value="${value}" ${state.tierPreset === value ? "selected" : ""}>${label}</option>`)
+      .join("");
+  }
+  const sampleModeSelect = document.getElementById("sampleModeSelect");
+  if (sampleModeSelect) {
+    sampleModeSelect.innerHTML = sampleModes
+      .map(([value, label]) => `<option value="${value}" ${state.sampleMode === value ? "selected" : ""}>${label}</option>`)
+      .join("");
+  }
 }
 
 function renderChampionGrid(champs) {
@@ -632,12 +857,18 @@ function renderSummary(champs) {
   const collected = champs.filter((champ) => displayStatOf(champ.id).pickCount > 0).length;
   const totalPicks = champs.reduce((sum, champ) => sum + Number(displayStatOf(champ.id).pickCount || 0), 0);
   const relations = scopedRelations();
+  const sampleInfo = effectiveSampleInfo();
+  const replayInfo = replayDateInferenceInfo();
+  const preset = currentTierPreset();
   document.getElementById("summaryGrid").innerHTML = `
     <div class="summary-card"><span>범위</span><strong>${scopeLabels[state.scope]}</strong></div>
     <div class="summary-card"><span>패치</span><strong>${state.patch === "all" ? "전체" : state.patch}</strong></div>
     <div class="summary-card"><span>통계 수집 챔피언</span><strong>${collected}</strong></div>
     <div class="summary-card"><span>픽 표본</span><strong>${totalPicks.toLocaleString()}</strong></div>
     <div class="summary-card"><span>관계 경기 표본</span><strong>${(relations.groups || 0).toLocaleString()}</strong></div>
+    <div class="summary-card"><span>티어 기준</span><strong>${preset.label}</strong></div>
+    <div class="summary-card"><span>표본 기준</span><strong>${sampleInfo.label}</strong></div>
+    <div class="summary-card"><span>날짜 추정</span><strong>${fmt(replayInfo.assigned || 0)} / ${fmt(replayInfo.sets || 0)}</strong></div>
   `;
   const exportMismatched = Boolean(DATA.sources.metaExportMismatched);
   const exportIncompatible = DATA.sources.metaExportUsable === false && DATA.sources.metaExportReason;
@@ -765,12 +996,14 @@ function renderRows(champs) {
   document.getElementById("championRows").innerHTML = champs
     .map((champ, index) => {
       const stat = displayStatOf(champ.id);
-      const tier = displayTier(stat);
+      const tierInfo = metaTierInfo(stat);
+      const tier = tierInfo.tier;
       return `
         <tr class="${state.selected === champ.id ? "active" : ""}" data-row="${champ.id}">
           <td>${index + 1}</td>
           <td><div class="champion-name">${championIcon(champ, 38)}<span>${champ.name}</span></div></td>
-          <td><span class="tier ${tier === "OP" ? "op" : ""}">${tier}</span></td>
+          <td><span class="tier ${tierClass(tier)}">${tier}</span></td>
+          <td><span class="score-cell" title="${scoreTitle(tierInfo)}">${scoreLabel(tierInfo)}</span></td>
           <td>${state.role === "all" ? roleLabel(bestRole(champ)) : roleLabel(state.role)}</td>
           <td>${pct(stat.winRate)}</td>
           <td>${rateWithCount(stat.pickRate, stat.pickCount)}</td>
@@ -1408,7 +1641,9 @@ function renderChampionTabNav() {
 
 function renderChampionMetricRow(stat) {
   const games = Number(stat.pickCount || 0);
+  const tierInfo = metaTierInfo(stat);
   return `<div class="metric-row">
+    <div class="metric"><span>종합점수</span><strong title="${scoreTitle(tierInfo)}">${scoreLabel(tierInfo)}</strong></div>
     <div class="metric"><span>승률</span><strong>${pct(stat.winRate)}</strong></div>
     <div class="metric"><span>승/패</span><strong>${fmt(stat.wins)} / ${fmt(stat.losses)}</strong></div>
     <div class="metric"><span>K/D/A</span><strong>${fmt(stat.kills)} / ${fmt(stat.deaths)} / ${fmt(stat.assists)}</strong></div>
@@ -1524,6 +1759,7 @@ function renderChampionView() {
   const relations = scopedRelations();
   const synergies = relations.pairs?.[champ.id] || [];
   const counters = relations.counters?.[champ.id] || [];
+  const tier = displayTier(stat);
   document.getElementById("championView").innerHTML = `
     <div class="detail-head">
       ${championIcon(champ, 76)}
@@ -1531,7 +1767,7 @@ function renderChampionView() {
         <h2>${champ.name}</h2>
         <p>${champ.category} · ${champ.tags.join(", ")} · ${scopeLabels[state.scope]}${state.role === "all" ? "" : ` · ${roleLabel(state.role)} 기록`} · ${sourceLabel(stat.source)}</p>
       </div>
-      <span class="tier ${displayTier(stat) === "OP" ? "op" : ""}">${displayTier(stat)}</span>
+      <span class="tier ${tierClass(tier)}">${tier}</span>
     </div>
     ${renderChampionTabNav()}
     ${renderChampionTabContent(champ, stat, rawStat, synergies, counters)}
@@ -1962,6 +2198,18 @@ document.getElementById("sortSelect").addEventListener("change", (event) => {
 
 document.getElementById("patchSelect").addEventListener("change", (event) => {
   state.patch = event.target.value;
+  render();
+});
+
+document.getElementById("tierPresetSelect")?.addEventListener("change", (event) => {
+  state.tierPreset = event.target.value;
+  writeStoredSetting("tfm2:tierPreset", state.tierPreset);
+  render();
+});
+
+document.getElementById("sampleModeSelect")?.addEventListener("change", (event) => {
+  state.sampleMode = event.target.value;
+  writeStoredSetting("tfm2:sampleMode", state.sampleMode);
   render();
 });
 

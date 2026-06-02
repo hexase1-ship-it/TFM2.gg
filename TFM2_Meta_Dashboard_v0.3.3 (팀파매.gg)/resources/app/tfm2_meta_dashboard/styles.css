@@ -297,7 +297,7 @@ h1 {
 .table-wrap {
   border: 1px solid var(--line);
   border-radius: 8px;
-  overflow: hidden;
+  overflow-x: auto;
   background: var(--panel);
 }
 
@@ -354,8 +354,28 @@ tbody tr.active {
   font-weight: 900;
 }
 
-.tier.op {
+.tier.tier-op {
   background: #ef4b5f;
+}
+
+.tier.tier-1 {
+  background: #ea8751;
+}
+
+.tier.tier-2 {
+  background: #eebb38;
+  color: #231a05;
+}
+
+.tier.tier-3 {
+  background: #45b182;
+}
+
+.score-cell {
+  display: inline-block;
+  min-width: 46px;
+  font-weight: 800;
+  color: #f7fafc;
 }
 
 .muted {
