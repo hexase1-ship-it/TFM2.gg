@@ -48,6 +48,32 @@ function Copy-CleanDirectory {
     Copy-Item -LiteralPath $Source -Destination $Destination -Recurse -Force
 }
 
+function Ensure-DashboardPythonRuntime {
+    param(
+        [string]$DashboardDestination,
+        [string]$CacheDirectory
+    )
+
+    $runtimePython = Join-Path $DashboardDestination "tfm2_meta_dashboard\runtime\python\python.exe"
+    if (Test-Path -LiteralPath $runtimePython -PathType Leaf) {
+        return
+    }
+
+    $runtimeDir = Split-Path -Parent $runtimePython
+    New-Item -ItemType Directory -Path $runtimeDir -Force | Out-Null
+
+    $pythonVersion = "3.12.3"
+    $runtimeZip = Join-Path $CacheDirectory "python-$pythonVersion-embed-amd64.zip"
+    $runtimeUrl = "https://www.python.org/ftp/python/$pythonVersion/python-$pythonVersion-embed-amd64.zip"
+    if (-not (Test-Path -LiteralPath $runtimeZip -PathType Leaf)) {
+        Write-Host "Downloading bundled Python runtime: $runtimeUrl"
+        Invoke-WebRequest -Uri $runtimeUrl -OutFile $runtimeZip
+    }
+
+    Expand-Archive -LiteralPath $runtimeZip -DestinationPath $runtimeDir -Force
+    Assert-PathExists -Path $runtimePython -Label "Bundled Python runtime"
+}
+
 $repoRoot = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot "..")).Path
 $outRoot = Join-Path $repoRoot $OutputRoot
 $packageRoot = Join-Path $outRoot "TFM2.gg_Distribution"
@@ -102,7 +128,9 @@ if ($builtExe) {
     Copy-Item -LiteralPath $builtExe -Destination (Join-Path $packageRoot "TFM2GGInstaller.exe") -Force
 }
 Copy-Item -LiteralPath $readmeSrc -Destination (Join-Path $payloadRoot "README.md") -Force
-Copy-CleanDirectory -Source $dashboardSrc -Destination (Join-Path $payloadRoot "dashboard_app")
+$dashboardDest = Join-Path $payloadRoot "dashboard_app"
+Copy-CleanDirectory -Source $dashboardSrc -Destination $dashboardDest
+Ensure-DashboardPythonRuntime -DashboardDestination $dashboardDest -CacheDirectory $outRoot
 New-Item -ItemType Directory -Path (Join-Path $payloadRoot "mods") -Force | Out-Null
 Copy-CleanDirectory -Source $modSrc -Destination (Join-Path $payloadRoot "mods\tfm2_meta_item_delegate")
 
