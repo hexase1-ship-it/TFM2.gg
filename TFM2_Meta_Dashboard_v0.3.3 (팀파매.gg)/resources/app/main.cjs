@@ -14,6 +14,7 @@ const REPO_FULL_NAME = "hexase1-ship-it/TFM2.gg";
 const RELEASE_API = `https://api.github.com/repos/${REPO_FULL_NAME}/releases/latest`;
 const LATEST_TAG_REF_API = `https://api.github.com/repos/${REPO_FULL_NAME}/git/ref/tags/latest`;
 const RELEASE_ASSET_NAME = "TFM2.gg_Distribution.zip";
+const PACKAGE_LAYOUT_VERSION = 2;
 
 let mainWindow = null;
 let dashboardDir = null;
@@ -215,8 +216,18 @@ function resolvePackageManifest() {
 }
 
 function extractVersionSha(version) {
-  const match = String(version || "").match(/\+([0-9a-f]{7,40})$/i);
+  const match = String(version || "").match(/\+([0-9a-f]{7,40})(?:\.dirty)?$/i);
   return match ? match[1].toLowerCase() : "";
+}
+
+function manifestRevision(manifest) {
+  const revision = String(manifest?.sourceRevision || "").trim().toLowerCase();
+  return revision || extractVersionSha(manifest?.packageVersion);
+}
+
+function manifestLayoutVersion(manifest) {
+  const value = Number.parseInt(manifest?.packageLayoutVersion || 0, 10);
+  return Number.isFinite(value) ? value : 0;
 }
 
 async function resolveLatestTagSha(ref) {
@@ -246,14 +257,20 @@ async function getUpdateInfo() {
   ]);
   const latestSha = await resolveLatestTagSha(tagRef);
   const currentVersion = localManifest?.packageVersion || "";
-  const currentSha = extractVersionSha(currentVersion);
-  const updateAvailable = !!latestSha && (!currentSha || !latestSha.startsWith(currentSha));
+  const currentSha = manifestRevision(localManifest);
+  const currentLayout = manifestLayoutVersion(localManifest);
+  const layoutUpdateNeeded = currentLayout < PACKAGE_LAYOUT_VERSION;
+  const revisionUpdateNeeded = !!latestSha && (!currentSha || !latestSha.startsWith(currentSha));
+  const updateAvailable = layoutUpdateNeeded || revisionUpdateNeeded;
   return {
     localManifest,
     release,
     latestSha,
     currentVersion,
     currentSha,
+    currentLayout,
+    layoutUpdateNeeded,
+    revisionUpdateNeeded,
     updateAvailable,
     asset: releaseAsset(release)
   };
@@ -263,6 +280,7 @@ function updateLogHtml(info) {
   const current = info.currentVersion || "알 수 없음";
   const latest = info.latestSha ? info.latestSha.slice(0, 12) : "확인 실패";
   const status = info.updateAvailable ? "새 버전 있음" : "최신 상태";
+  const layout = info.currentLayout || "-";
   const release = info.release || {};
   const notes = release.body ? escapeHtml(release.body).replace(/\n/g, "<br>") : "릴리스 노트가 없습니다.";
   const asset = info.asset?.name || RELEASE_ASSET_NAME;
@@ -287,6 +305,7 @@ function updateLogHtml(info) {
       <h1>TFM2.gg 업데이트 로그</h1>
       <p>상태: <code>${escapeHtml(status)}</code></p>
       <p>현재 패키지: <code>${escapeHtml(current)}</code></p>
+      <p>설치 구조: <code>${escapeHtml(layout)}</code></p>
       <p>최신 커밋: <code>${escapeHtml(latest)}</code></p>
       <p>배포 파일: <code>${escapeHtml(asset)}</code></p>
     </section>
@@ -400,11 +419,12 @@ async function checkForUpdatesOnStartup() {
       return;
     }
     updatePromptShown = true;
+    const updateReason = info.layoutUpdateNeeded ? "설치 구조 업데이트 필요" : "새 패키지 버전 있음";
     const response = await dialog.showMessageBox(mainWindow, {
       type: "question",
       title: "TFM2.gg 업데이트",
       message: "TFM2.gg 새 버전이 있습니다.",
-      detail: `현재 버전: ${info.currentVersion || "알 수 없음"}\n최신 버전: ${info.latestSha ? info.latestSha.slice(0, 12) : "latest"}\n\n새 버전으로 업데이트하시겠습니까?`,
+      detail: `현재 버전: ${info.currentVersion || "알 수 없음"}\n설치 구조: ${info.currentLayout || "-"}\n최신 버전: ${info.latestSha ? info.latestSha.slice(0, 12) : "latest"}\n사유: ${updateReason}\n\n새 버전으로 업데이트하시겠습니까?`,
       buttons: ["새 버전으로 업데이트", "나중에"],
       defaultId: 0,
       cancelId: 1

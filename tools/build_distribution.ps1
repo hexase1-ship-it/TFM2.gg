@@ -216,15 +216,26 @@ Assert-PathExists -Path $dashboardShellExe -Label "Dashboard shell executable"
 Assert-PathExists -Path $modDll -Label "Addon DLL"
 
 $sha = ""
+$fullSha = ""
 try {
+    $fullSha = (git -C $repoRoot rev-parse HEAD).Trim()
     $sha = (git -C $repoRoot rev-parse --short=12 HEAD).Trim()
+    $dirty = (git -C $repoRoot status --porcelain)
+    if ($dirty) {
+        $fullSha = "$fullSha.dirty"
+        $sha = "$sha.dirty"
+    }
 } catch {
     $sha = "nogit"
+    $fullSha = "nogit"
 }
-$version = (Get-Date -Format "yyyy.MM.dd.HHmm") + "+$sha"
+$version = "0.4.7+$sha"
 $manifest = [ordered]@{
     name = "TFM2.gg"
     packageVersion = $version
+    sourceRevision = $fullSha
+    packageLayoutVersion = 2
+    dashboardInstallDir = "TFM2.gg"
     targetGameVersion = "0.4.7"
     repository = "hexase1-ship-it/TFM2.gg"
     releaseAsset = "TFM2.gg_Distribution.zip"
@@ -239,6 +250,7 @@ $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
 [System.IO.File]::WriteAllText((Join-Path $packageRoot "package_manifest.json"), $manifestJson, $utf8NoBom)
 [System.IO.File]::WriteAllText((Join-Path $payloadRoot "package_manifest.json"), $manifestJson, $utf8NoBom)
 [System.IO.File]::WriteAllText((Join-Path $dashboardDest "package_manifest.json"), $manifestJson, $utf8NoBom)
+[System.IO.File]::WriteAllText((Join-Path $dashboardShellDest "package_manifest.json"), $manifestJson, $utf8NoBom)
 
 $zipPath = Join-Path $outRoot "TFM2.gg_Distribution.zip"
 if (Test-Path -LiteralPath $zipPath) {

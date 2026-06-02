@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import queue
+import re
 import shutil
 import subprocess
 import sys
@@ -26,6 +27,8 @@ REPO_FULL_NAME = "hexase1-ship-it/TFM2.gg"
 RELEASE_API = f"https://api.github.com/repos/{REPO_FULL_NAME}/releases/latest"
 RELEASE_ASSET_NAME = "TFM2.gg_Distribution.zip"
 TARGET_GAME_VERSION = "0.4.7"
+PACKAGE_LAYOUT_VERSION = 2
+DASHBOARD_INSTALL_DIR_NAME = APP_NAME
 DASHBOARD_EXE_NAME = "TFM2MetaDashboard.exe"
 DASHBOARD_SHELL_DEFAULT_ITEMS = (
     DASHBOARD_EXE_NAME,
@@ -155,6 +158,26 @@ def remove_known_path(root: Path, target: Path) -> None:
         target.unlink()
 
 
+def remove_empty_known_dir(root: Path, target: Path) -> None:
+    if target.is_dir() and not any(target.iterdir()):
+        remove_known_path(root, target)
+
+
+def ensure_writable_files(paths: list[Path]) -> None:
+    locked = []
+    for path in paths:
+        if not path.exists() or path.is_dir():
+            continue
+        try:
+            with path.open("r+b"):
+                pass
+        except OSError:
+            locked.append(path)
+    if locked:
+        joined = "\n".join(str(path) for path in locked)
+        raise PermissionError("파일이 사용 중입니다. 게임과 대시보드를 종료한 뒤 다시 실행하세요.\n" + joined)
+
+
 def dir_size(path: Path) -> int:
     if not path.exists():
         return 0
@@ -202,6 +225,15 @@ class InstallerModel:
         payload = root / "payload"
         return payload if payload.exists() else root
 
+    def dashboard_install_dir(self, game_dir: Path) -> Path:
+        return game_dir / DASHBOARD_INSTALL_DIR_NAME
+
+    def dashboard_app_dir(self, game_dir: Path) -> Path:
+        return self.dashboard_install_dir(game_dir) / "resources" / "app"
+
+    def legacy_dashboard_app_dir(self, game_dir: Path) -> Path:
+        return game_dir / "resources" / "app"
+
     def source_project_dir(self, prefix: str, fallback_name: str) -> Path:
         exact = self.root / fallback_name
         if exact.exists():
@@ -243,6 +275,24 @@ class InstallerModel:
                 if item.name.lower() not in DASHBOARD_SHELL_EXCLUDED_NAMES
             ]
         return list(DASHBOARD_SHELL_DEFAULT_ITEMS)
+
+    def dashboard_shell_targets(self, game_dir: Path, source_root: Path | None = None) -> list[Path]:
+        install_dir = self.dashboard_install_dir(game_dir)
+        return [install_dir / name for name in self.dashboard_shell_item_names(source_root)]
+
+    def legacy_dashboard_shell_targets(self, game_dir: Path) -> list[Path]:
+        return [game_dir / name for name in DASHBOARD_SHELL_DEFAULT_ITEMS]
+
+    def legacy_dashboard_targets(self, game_dir: Path) -> list[Path]:
+        legacy_app = self.legacy_dashboard_app_dir(game_dir)
+        return [
+            legacy_app / "main.cjs",
+            legacy_app / "package.json",
+            legacy_app / "tfm2_meta_dashboard",
+            legacy_app / "mods" / MOD_ID,
+            legacy_app / "package_manifest.json",
+            *self.legacy_dashboard_shell_targets(game_dir),
+        ]
 
     def addon_payload(self, source_root: Path | None = None) -> Path:
         payload = self.payload_root(source_root)
@@ -342,69 +392,97 @@ class InstallerModel:
                 )
 
         mods_ok = (game_dir / "mods").exists()
-        resources_ok = (game_dir / "resources" / "app").exists()
-        checks.append(ComponentStatus(mods_ok, "mods 폴더", "있음" if mods_ok else "없음"))
+        dashboard_home_ok = self.dashboard_install_dir(game_dir).exists()
+        checks.append(ComponentStatus(True, "mods 폴더", "있음" if mods_ok else "설치 시 생성"))
         checks.append(
             ComponentStatus(
-                resources_ok,
-                "dashboard resources",
-                "있음" if resources_ok else "없음",
+                True,
+                "TFM2.gg 폴더",
+                "있음" if dashboard_home_ok else "설치 시 생성",
             )
         )
 
-        if size_checked and size_matches == size_checked and mods_ok and resources_ok:
+        if size_checked and size_matches == size_checked:
             main = ComponentStatus(True, "호환", f"Teamfight Manager 2 {TARGET_GAME_VERSION} 기준과 일치")
-        elif mods_ok and resources_ok:
+        elif size_checked:
             main = ComponentStatus(
                 False,
                 "주의",
                 f"설치는 가능하지만 {TARGET_GAME_VERSION} 기준 파일과 완전히 일치하지 않습니다.",
             )
         else:
-            main = ComponentStatus(False, "부적합", "필수 폴더가 없어 자동 설치가 안전하지 않습니다.")
+            main = ComponentStatus(False, "부적합", "필수 게임 파일이 없어 자동 설치가 안전하지 않습니다.")
         return main, checks
 
     def install_dashboard(self, game_dir: Path, source_root: Path | None = None) -> None:
-        resources_app = game_dir / "resources" / "app"
+        resources_app = self.dashboard_app_dir(game_dir)
         resources_app.mkdir(parents=True, exist_ok=True)
         self.backup_existing(game_dir, [resources_app / "tfm2_meta_dashboard", resources_app / "mods" / MOD_ID, resources_app / "package_manifest.json"])
         copy_tree_contents(self.dashboard_payload(source_root), resources_app)
 
     def install_dashboard_shell(self, game_dir: Path, source_root: Path | None = None) -> None:
         shell = self.dashboard_shell_payload(source_root)
-        targets = [game_dir / name for name in self.dashboard_shell_item_names(source_root)]
-        self.backup_existing(game_dir, [target for target in targets if target.exists()])
-        for target in targets:
+        install_dir = self.dashboard_install_dir(game_dir)
+        existing_shell_items = []
+        if install_dir.exists():
+            existing_shell_items = [
+                item for item in install_dir.iterdir()
+                if item.name.lower() not in DASHBOARD_SHELL_EXCLUDED_NAMES
+            ]
+        self.backup_existing(game_dir, existing_shell_items)
+        for target in existing_shell_items:
             if target.exists():
                 remove_known_path(game_dir, target)
-        copy_dashboard_shell_contents(shell, game_dir)
+        copy_dashboard_shell_contents(shell, install_dir)
 
     def install_addon(self, game_dir: Path, source_root: Path | None = None) -> None:
         mods_dir = game_dir / "mods"
         addon_dst = mods_dir / MOD_ID
         mods_dir.mkdir(parents=True, exist_ok=True)
         self.backup_existing(game_dir, [addon_dst])
+        if addon_dst.exists():
+            remove_known_path(game_dir, addon_dst)
         copy_dir(self.addon_payload(source_root), addon_dst)
 
     def install_all(self, game_dir: Path, source_root: Path | None = None) -> None:
         self.save_config(game_dir)
+        ensure_writable_files(self.install_lock_paths(game_dir))
+        self.migrate_legacy_dashboard(game_dir)
         self.install_dashboard_shell(game_dir, source_root)
         self.install_dashboard(game_dir, source_root)
         self.install_addon(game_dir, source_root)
 
     def remove_all(self, game_dir: Path) -> None:
-        resources_app = game_dir / "resources" / "app"
+        ensure_writable_files(self.install_lock_paths(game_dir))
         targets = [
-            resources_app / "tfm2_meta_dashboard",
-            resources_app / "mods" / MOD_ID,
-            resources_app / "package_manifest.json",
+            self.dashboard_install_dir(game_dir),
             game_dir / "mods" / MOD_ID,
+            *self.legacy_dashboard_targets(game_dir),
         ]
-        targets.extend(game_dir / name for name in self.dashboard_shell_item_names())
         self.backup_existing(game_dir, [target for target in targets if target.exists()])
         for target in targets:
             if target.exists():
                 remove_known_path(game_dir, target)
+        self.remove_empty_legacy_dirs(game_dir)
+
+    def migrate_legacy_dashboard(self, game_dir: Path) -> None:
+        targets = [target for target in self.legacy_dashboard_targets(game_dir) if target.exists()]
+        if not targets:
+            return
+        self.backup_existing(game_dir, targets)
+        for target in targets:
+            if target.exists():
+                remove_known_path(game_dir, target)
+        self.remove_empty_legacy_dirs(game_dir)
+
+    def remove_empty_legacy_dirs(self, game_dir: Path) -> None:
+        legacy_app = self.legacy_dashboard_app_dir(game_dir)
+        for target in [
+            legacy_app / "mods",
+            legacy_app,
+            game_dir / "resources",
+        ]:
+            remove_empty_known_dir(game_dir, target)
 
     def backup_existing(self, game_dir: Path, targets: list[Path]) -> None:
         existing = [target for target in targets if target.exists()]
@@ -425,20 +503,40 @@ class InstallerModel:
     def installed_status(self, game_dir: Path) -> dict:
         addon = game_dir / "mods" / MOD_ID
         mod_info = read_json(addon / "mod.mod_info", {})
-        dashboard = game_dir / "resources" / "app" / "tfm2_meta_dashboard"
-        dashboard_shell = game_dir / DASHBOARD_EXE_NAME
+        dashboard_app = self.dashboard_app_dir(game_dir)
+        dashboard = dashboard_app / "tfm2_meta_dashboard"
+        dashboard_shell = self.dashboard_install_dir(game_dir) / DASHBOARD_EXE_NAME
+        legacy_dashboard = self.legacy_dashboard_app_dir(game_dir) / "tfm2_meta_dashboard"
+        legacy_dashboard_shell = game_dir / DASHBOARD_EXE_NAME
         core_json = addon / "core-item-builds.json"
         core_data = read_json(core_json, {})
         installed_manifest = self.installed_manifest(game_dir)
         installed_version = self.package_version(installed_manifest)
-        package_version = installed_version or ("설치 버전 기록 없음" if dashboard.exists() or dashboard_shell.exists() or addon.exists() else self.package_version(self.manifest) or "local-dev")
+        has_legacy = legacy_dashboard.exists() or legacy_dashboard_shell.exists()
+        package_version = installed_version or ("설치 버전 기록 없음" if dashboard.exists() or dashboard_shell.exists() or has_legacy or addon.exists() else self.package_version(self.manifest) or "local-dev")
+        layout_version = self.manifest_layout_version(installed_manifest)
+        install_complete = self.install_complete(game_dir)
+        if install_complete:
+            layout_status = "최신 구조"
+        elif has_legacy:
+            layout_status = "이전 구조 정리 필요"
+        elif dashboard.exists() or dashboard_shell.exists() or addon.exists():
+            layout_status = "복구 필요"
+        else:
+            layout_status = "미설치"
         return {
             "dashboardInstalled": dashboard.exists(),
             "dashboardShellInstalled": dashboard_shell.exists(),
+            "legacyDashboardInstalled": has_legacy,
             "addonInstalled": addon.exists(),
             "addonVersion": mod_info.get("version") or "-",
             "coreGeneratedAt": core_data.get("generatedAt") or "-",
             "packageVersion": package_version,
+            "sourceRevision": self.manifest_revision(installed_manifest),
+            "layoutVersion": layout_version,
+            "layoutStatus": layout_status,
+            "installComplete": install_complete,
+            "dashboardInstallDir": str(self.dashboard_install_dir(game_dir)),
             "dashboardSize": dir_size(dashboard),
             "dashboardShellSize": dashboard_shell.stat().st_size if dashboard_shell.exists() else 0,
             "addonSize": dir_size(addon),
@@ -449,10 +547,68 @@ class InstallerModel:
             return ""
         return str(manifest.get("packageVersion") or "").strip()
 
+    def manifest_revision(self, manifest: dict | None) -> str:
+        if not isinstance(manifest, dict):
+            return ""
+        revision = str(manifest.get("sourceRevision") or "").strip().lower()
+        if revision:
+            return revision
+        match = re.search(r"\+([0-9a-f]{7,40})(?:\.dirty)?$", self.package_version(manifest), re.IGNORECASE)
+        return match.group(1).lower() if match else ""
+
+    def manifest_layout_version(self, manifest: dict | None) -> int:
+        if not isinstance(manifest, dict):
+            return 0
+        try:
+            return int(manifest.get("packageLayoutVersion") or 0)
+        except (TypeError, ValueError):
+            return 0
+
+    def required_install_paths(self, game_dir: Path) -> list[Path]:
+        dashboard_app = self.dashboard_app_dir(game_dir)
+        return [
+            self.dashboard_install_dir(game_dir) / DASHBOARD_EXE_NAME,
+            dashboard_app / "main.cjs",
+            dashboard_app / "tfm2_meta_dashboard",
+            game_dir / "mods" / MOD_ID / "tfm2_meta_item_delegate.dll",
+        ]
+
+    def install_lock_paths(self, game_dir: Path) -> list[Path]:
+        return [
+            self.dashboard_install_dir(game_dir) / DASHBOARD_EXE_NAME,
+            game_dir / DASHBOARD_EXE_NAME,
+            game_dir / "mods" / MOD_ID / "tfm2_meta_item_delegate.dll",
+        ]
+
+    def install_complete(self, game_dir: Path) -> bool:
+        manifest = self.installed_manifest(game_dir)
+        if self.manifest_layout_version(manifest) < PACKAGE_LAYOUT_VERSION:
+            return False
+        return all(path.exists() for path in self.required_install_paths(game_dir))
+
+    def needs_update(self, game_dir: Path, remote_manifest: dict) -> tuple[bool, str]:
+        current_manifest = self.installed_manifest(game_dir)
+        current_revision = self.manifest_revision(current_manifest)
+        remote_revision = self.manifest_revision(remote_manifest)
+        current_layout = self.manifest_layout_version(current_manifest)
+        remote_layout = self.manifest_layout_version(remote_manifest) or PACKAGE_LAYOUT_VERSION
+        if current_layout < remote_layout:
+            return True, "설치 구조 업데이트 필요"
+        if not self.install_complete(game_dir):
+            return True, "설치 파일 복구 필요"
+        if remote_revision and current_revision and current_revision != remote_revision:
+            return True, "새 패키지 버전 있음"
+        if remote_revision and not current_revision:
+            return True, "현재 설치 버전 확인 필요"
+        return False, "이미 최신 상태"
+
     def installed_manifest(self, game_dir: Path) -> dict:
         for candidate in [
-            game_dir / "resources" / "app" / "package_manifest.json",
-            game_dir / "resources" / "app" / "tfm2_meta_dashboard" / "package_manifest.json",
+            self.dashboard_install_dir(game_dir) / "package_manifest.json",
+            self.dashboard_app_dir(game_dir) / "package_manifest.json",
+            self.dashboard_app_dir(game_dir) / "tfm2_meta_dashboard" / "package_manifest.json",
+            self.legacy_dashboard_app_dir(game_dir) / "package_manifest.json",
+            self.legacy_dashboard_app_dir(game_dir) / "tfm2_meta_dashboard" / "package_manifest.json",
         ]:
             data = read_json(candidate)
             if isinstance(data, dict):
@@ -463,6 +619,7 @@ class InstallerModel:
         for candidate in [
             package / "package_manifest.json",
             package / "payload" / "package_manifest.json",
+            package / "payload" / "dashboard_shell" / "package_manifest.json",
             package / "payload" / "dashboard_app" / "package_manifest.json",
         ]:
             data = read_json(candidate)
@@ -768,12 +925,14 @@ class Tfm2InstallerApp(tk.Tk):
             f"실행 파일: {'설치됨' if installed['dashboardShellInstalled'] else '없음'}",
             f"대시보드: {'설치됨' if installed['dashboardInstalled'] else '없음'}",
             f"애드온: {'설치됨' if installed['addonInstalled'] else '없음'}",
+            f"설치 구조: {installed['layoutStatus']}",
             f"애드온 버전: {installed['addonVersion']}",
             f"메타 생성: {installed['coreGeneratedAt']}",
         ]
         self.install_card_var.set("\n".join(install_lines))
         self.update_card_var.set(
             f"패키지: {installed['packageVersion']}\n"
+            f"레이아웃: {installed['layoutVersion'] or '-'}\n"
             f"Repo: {REPO_FULL_NAME}\n"
             f"Asset: {RELEASE_ASSET_NAME}"
         )
@@ -790,12 +949,15 @@ class Tfm2InstallerApp(tk.Tk):
             game_dir = self.current_game_dir()
             if kind in {"install", "repair"}:
                 self.model.install_all(game_dir)
+                if not self.model.install_complete(game_dir):
+                    missing = [str(path) for path in self.model.required_install_paths(game_dir) if not path.exists()]
+                    raise RuntimeError("설치 검증 실패: 필수 파일이 누락되었습니다.\n" + "\n".join(missing))
                 if kind == "install":
-                    self.work_queue.put(("log", "설치 완료: 실행 파일, 대시보드, 아이템 자동 설정 애드온이 적용되었습니다."))
-                    self.work_queue.put(("success", ("설치 완료", "TFM2.gg 설치가 완료되었습니다.\nTFM2MetaDashboard.exe가 게임 폴더에 설치되었습니다.")))
+                    self.work_queue.put(("log", "설치 완료: 대시보드 파일은 TFM2.gg 폴더에 정리되고 애드온이 적용되었습니다."))
+                    self.work_queue.put(("success", ("설치 완료", "TFM2.gg 설치가 완료되었습니다.\n대시보드는 게임 폴더의 TFM2.gg 폴더 안에 설치되었습니다.")))
                 else:
-                    self.work_queue.put(("log", "복구 완료: 실행 파일, 대시보드, 애드온을 다시 적용했습니다."))
-                    self.work_queue.put(("success", ("복구 완료", "TFM2.gg 복구가 완료되었습니다.\nTFM2MetaDashboard.exe와 필요한 파일을 다시 적용했습니다.")))
+                    self.work_queue.put(("log", "복구 완료: 대시보드 폴더와 애드온을 다시 적용했습니다."))
+                    self.work_queue.put(("success", ("복구 완료", "TFM2.gg 복구가 완료되었습니다.\n대시보드 파일은 TFM2.gg 폴더에 정리되었습니다.")))
             elif kind == "addon":
                 self.model.install_addon(game_dir)
                 self.work_queue.put(("log", "애드온 설치 완료: 아이템 자동 설정 모드가 적용되었습니다."))
@@ -811,13 +973,13 @@ class Tfm2InstallerApp(tk.Tk):
                 current_manifest = self.model.installed_manifest(game_dir)
                 current_version = self.model.package_version(current_manifest)
                 self.work_queue.put(("log", f"원격 패키지 확인 완료: {package}"))
-                status = self.model.installed_status(game_dir)
-                install_complete = status["dashboardShellInstalled"] and status["dashboardInstalled"] and status["addonInstalled"]
-                if current_version and remote_version and current_version == remote_version and install_complete:
-                    self.work_queue.put(("log", f"이미 최신 버전입니다: {current_version}"))
-                    self.work_queue.put(("info", ("업데이트 확인", f"이미 최신 버전입니다.\n현재 버전: {current_version}")))
+                needs_update, reason = self.model.needs_update(game_dir, remote_manifest)
+                if not needs_update:
+                    self.work_queue.put(("log", f"이미 최신 상태입니다: {current_version or reason}"))
+                    self.work_queue.put(("info", ("업데이트 확인", f"이미 최신 상태입니다.\n현재 버전: {current_version or '-'}")))
                 else:
-                    self.work_queue.put(("remote_apply", (package, release, current_version, remote_version)))
+                    self.work_queue.put(("log", f"업데이트 필요: {reason}"))
+                    self.work_queue.put(("remote_apply", (package, release, current_version, remote_version, reason)))
             self.work_queue.put(("refresh", None))
             self.work_queue.put(("done", kind))
         except PermissionError as exc:
@@ -845,11 +1007,12 @@ class Tfm2InstallerApp(tk.Tk):
                 elif kind == "refresh":
                     self.refresh_status()
                 elif kind == "remote_apply":
-                    package, release, current_version, remote_version = payload
+                    package, release, current_version, remote_version, reason = payload
                     tag = release.get("tag_name") or "latest"
                     detail = (
                         f"현재 버전: {current_version or '알 수 없음'}\n"
                         f"새 버전: {remote_version or tag}\n\n"
+                        f"사유: {reason}\n\n"
                         "새 버전으로 업데이트하시겠습니까?"
                     )
                     if messagebox.askyesno("원격 업데이트", detail):
@@ -870,9 +1033,13 @@ class Tfm2InstallerApp(tk.Tk):
     def apply_remote_package(self, package: Path):
         try:
             self.work_queue.put(("log", "원격 패키지 설치/복구 적용 시작"))
-            self.model.install_all(self.current_game_dir(), source_root=package)
+            game_dir = self.current_game_dir()
+            self.model.install_all(game_dir, source_root=package)
+            if not self.model.install_complete(game_dir):
+                missing = [str(path) for path in self.model.required_install_paths(game_dir) if not path.exists()]
+                raise RuntimeError("업데이트 검증 실패: 필수 파일이 누락되었습니다.\n" + "\n".join(missing))
             self.work_queue.put(("log", "업데이트 완료: 새 원격 패키지가 적용되었습니다."))
-            self.work_queue.put(("success", ("업데이트 완료", "TFM2.gg 업데이트가 완료되었습니다.\nTFM2MetaDashboard.exe와 새 패키지가 게임 폴더에 적용되었습니다.")))
+            self.work_queue.put(("success", ("업데이트 완료", "TFM2.gg 업데이트가 완료되었습니다.\n대시보드 파일은 TFM2.gg 폴더에 정리되었습니다.")))
             self.work_queue.put(("refresh", None))
         except Exception as exc:
             self.work_queue.put(("error", str(exc)))
