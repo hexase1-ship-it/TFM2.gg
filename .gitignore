@@ -1,6 +1,12 @@
 # Backups and packaged archives
 _backup*/
 *.zip
+dist/
+*.spec
+
+# Python local caches
+__pycache__/
+**/__pycache__/
 
 # Rust build output
 **/target/

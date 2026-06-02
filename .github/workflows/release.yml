@@ -1,0 +1,48 @@
+name: Build TFM2.gg distribution
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install PyInstaller
+        run: python -m pip install pyinstaller
+
+      - name: Build distribution
+        shell: pwsh
+        run: ./tools/build_distribution.ps1 -BuildExe
+
+      - name: Publish latest release asset
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $tag = "latest"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git tag -f $tag
+          git push origin $tag --force
+          $notes = "Automated TFM2.gg distribution built from $env:GITHUB_SHA on $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss UTC')."
+          gh release view $tag 2>$null
+          if ($LASTEXITCODE -ne 0) {
+            gh release create $tag --title "TFM2.gg latest" --notes $notes --latest
+          } else {
+            gh release edit $tag --title "TFM2.gg latest" --notes $notes --latest
+          }
+          gh release upload $tag dist/TFM2.gg_Distribution.zip --clobber
