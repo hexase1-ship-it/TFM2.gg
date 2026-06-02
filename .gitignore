@@ -1,0 +1,37 @@
+# Backups and packaged archives
+_backup*/
+*.zip
+
+# Rust build output
+**/target/
+**/*.pdb
+**/*.ilk
+**/*.exp
+**/*.dll.lib
+
+# Electron packaged runtime. The repository keeps resources/app sources instead.
+TFM2_Meta_Dashboard_v0.3.3 (팀파매.gg)/TFM2MetaDashboard.exe
+TFM2_Meta_Dashboard_v0.3.3 (팀파매.gg)/chrome_*.pak
+TFM2_Meta_Dashboard_v0.3.3 (팀파매.gg)/d3dcompiler_47.dll
+TFM2_Meta_Dashboard_v0.3.3 (팀파매.gg)/dxcompiler.dll
+TFM2_Meta_Dashboard_v0.3.3 (팀파매.gg)/dxil.dll
+TFM2_Meta_Dashboard_v0.3.3 (팀파매.gg)/ffmpeg.dll
+TFM2_Meta_Dashboard_v0.3.3 (팀파매.gg)/icudtl.dat
+TFM2_Meta_Dashboard_v0.3.3 (팀파매.gg)/libEGL.dll
+TFM2_Meta_Dashboard_v0.3.3 (팀파매.gg)/libGLESv2.dll
+TFM2_Meta_Dashboard_v0.3.3 (팀파매.gg)/LICENSES.chromium.html
+TFM2_Meta_Dashboard_v0.3.3 (팀파매.gg)/resources.pak
+TFM2_Meta_Dashboard_v0.3.3 (팀파매.gg)/snapshot_blob.bin
+TFM2_Meta_Dashboard_v0.3.3 (팀파매.gg)/v8_context_snapshot.bin
+TFM2_Meta_Dashboard_v0.3.3 (팀파매.gg)/vk_swiftshader.dll
+TFM2_Meta_Dashboard_v0.3.3 (팀파매.gg)/vk_swiftshader_icd.json
+TFM2_Meta_Dashboard_v0.3.3 (팀파매.gg)/vulkan-1.dll
+TFM2_Meta_Dashboard_v0.3.3 (팀파매.gg)/locales/
+
+# Bundled Python runtime is a release artifact.
+TFM2_Meta_Dashboard_v0.3.3 (팀파매.gg)/resources/app/tfm2_meta_dashboard/runtime/
+
+# Local logs and temporary executable backups
+**/_last_refresh_log.txt
+**/debug.log
+**/*.bak

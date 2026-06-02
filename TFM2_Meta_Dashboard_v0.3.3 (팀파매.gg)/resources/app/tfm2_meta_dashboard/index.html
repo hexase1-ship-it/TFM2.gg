@@ -1,0 +1,94 @@
+<!doctype html>
+<html lang="ko">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>TFM2 Meta Dashboard</title>
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <aside class="sidebar">
+      <div class="brand">
+        <span class="brand-mark">BP</span>
+        <div>
+          <strong>TFM2 메타</strong>
+          <small>저장 데이터 / 리플레이 통계</small>
+        </div>
+      </div>
+      <input id="search" class="search" type="search" placeholder="챔피언 검색" />
+      <div id="sideRoles" class="side-roles"></div>
+      <div id="championGrid" class="champion-grid"></div>
+    </aside>
+
+    <main class="main">
+      <header class="topbar">
+        <div>
+          <small id="sourceLine">TFM2 local data</small>
+          <h1>챔피언 메타 통계</h1>
+        </div>
+        <div class="status-strip">
+          <span id="exportStatus"></span>
+          <span id="watchStatus"></span>
+          <span id="sampleStatus"></span>
+        </div>
+      </header>
+
+      <section class="toolbar">
+        <div class="nav-shell">
+          <div class="nav-row nav-row-primary">
+            <span>데이터 범위</span>
+            <div id="scopeTabs" class="scope-tabs"></div>
+          </div>
+          <div class="nav-row">
+            <span>카테고리</span>
+            <div id="viewTabs" class="view-tabs"></div>
+          </div>
+          <div class="nav-row">
+            <span>역할</span>
+            <div id="roleTabs" class="role-tabs"></div>
+          </div>
+        </div>
+        <div class="filter-stack">
+          <select id="sortSelect" class="select">
+            <option value="tier">티어순</option>
+            <option value="winRate">승률순</option>
+            <option value="pickCount">픽 표본순</option>
+            <option value="banCount">밴 표본순</option>
+            <option value="draftMentions">기록 등장순</option>
+            <option value="name">이름순</option>
+          </select>
+          <select id="patchSelect" class="select"></select>
+        </div>
+      </section>
+
+      <section id="listView">
+        <section class="summary-grid" id="summaryGrid"></section>
+
+        <section class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>순위</th>
+                <th>챔피언</th>
+                <th>계산 티어</th>
+                <th>주 역할</th>
+                <th>승률</th>
+                <th>픽률</th>
+                <th>밴률</th>
+                <th>밴픽률</th>
+                <th>출처</th>
+              </tr>
+            </thead>
+            <tbody id="championRows"></tbody>
+          </table>
+        </section>
+      </section>
+
+      <section class="detail" id="championView"></section>
+      <section class="match-view" id="matchView" hidden></section>
+    </main>
+
+    <script src="data/meta-data.js"></script>
+    <script src="app.js"></script>
+  </body>
+</html>

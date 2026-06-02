@@ -1,0 +1,7 @@
+{
+  "name": "tfm2-meta-dashboard",
+  "version": "0.3.4",
+  "private": true,
+  "description": "Desktop shell for the Teamfight Manager 2 meta dashboard.",
+  "main": "main.cjs"
+}
