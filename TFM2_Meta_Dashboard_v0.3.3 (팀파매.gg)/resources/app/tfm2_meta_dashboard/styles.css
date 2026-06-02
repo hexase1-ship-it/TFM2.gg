@@ -260,13 +260,13 @@ h1 {
 }
 
 .toolbar .select {
-  width: 190px;
+  width: 220px;
 }
 
 .filter-stack {
   display: grid;
   gap: 8px;
-  min-width: 190px;
+  min-width: 220px;
 }
 
 .summary-grid {

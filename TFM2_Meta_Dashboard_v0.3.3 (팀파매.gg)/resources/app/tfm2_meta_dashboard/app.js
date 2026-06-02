@@ -48,7 +48,7 @@ const tierPresetById = Object.fromEntries(tierPresets.map(([id, label, weights])
 function readStoredSetting(key, fallback, allowed) {
   try {
     const value = window.localStorage?.getItem(key);
-    return allowed.includes(value) ? value : fallback;
+    return !allowed || allowed.includes(value) ? value : fallback;
   } catch (_err) {
     return fallback;
   }
@@ -71,6 +71,7 @@ const state = {
   sort: "tier",
   tierPreset: readStoredSetting("tfm2:tierPreset", "classic", tierPresets.map(([id]) => id)),
   sampleMode: readStoredSetting("tfm2:sampleMode", "auto", sampleModes.map(([id]) => id)),
+  tournamentSplit: readStoredSetting("tfm2:tournamentSplit", "all"),
   matchSearch: "",
   matchDate: "all",
   championTab: "overview",
@@ -81,9 +82,90 @@ const state = {
 const championById = new Map(DATA.champions.map((champ) => [champ.id, champ]));
 const roleLabels = Object.fromEntries(roles);
 const scopeLabels = Object.fromEntries(scopes);
+const leagueMeta = DATA.leagueMeta || {};
 let metaTierCache = null;
 
+function countForSplit(axis, key) {
+  return Number(leagueMeta.counts?.[axis]?.[key] || 0);
+}
+
+function splitOptionLabel(label, axis, key) {
+  const count = countForSplit(axis, key);
+  return count ? `${label} (${fmt(count)}경기)` : label;
+}
+
+function tournamentSplitOptions() {
+  const options = [["all", "대회 전체"]];
+  for (const row of leagueMeta.regions || []) {
+    options.push([`region:${row.regionKey}`, splitOptionLabel(`${row.label} 전체`, "region", row.regionKey)]);
+  }
+  for (const row of leagueMeta.divisions || []) {
+    options.push([`division:${row.key}`, splitOptionLabel(`${row.label} 전체`, "division", row.key)]);
+  }
+  for (const row of leagueMeta.leagues || []) {
+    const key = String(row.leagueId);
+    options.push([`league:${key}`, splitOptionLabel(row.leagueLabel || `리그 ${key}`, "league", key)]);
+  }
+  for (const row of leagueMeta.competitions || []) {
+    if (row.key === "unknown") continue;
+    options.push([`competition:${row.key}`, splitOptionLabel(row.label, "competition", row.key)]);
+  }
+  return options;
+}
+
+function parseTournamentSplit(value = state.tournamentSplit) {
+  if (!value || value === "all" || state.scope !== "tournament") return null;
+  const divider = value.indexOf(":");
+  if (divider < 0) return null;
+  const axis = value.slice(0, divider);
+  const key = value.slice(divider + 1);
+  if (!axis || !key) return null;
+  return { axis, key, value };
+}
+
+function activeTournamentSplit() {
+  const split = parseTournamentSplit();
+  if (!split) return null;
+  const stats = state.patch !== "all"
+    ? DATA.tournamentSplits?.statsByPatch?.[split.axis]?.[state.patch]?.[split.key]
+    : DATA.tournamentSplits?.stats?.[split.axis]?.[split.key];
+  return stats ? split : null;
+}
+
+function splitKeyForMatch(match, axis) {
+  if (axis === "league") return match.leagueId === null || match.leagueId === undefined ? null : String(match.leagueId);
+  if (axis === "region") return match.regionKey || null;
+  if (axis === "division") return match.division === null || match.division === undefined ? null : String(match.division);
+  if (axis === "regionDivision") return match.regionKey && match.division !== null && match.division !== undefined ? `${match.regionKey}:${match.division}` : null;
+  if (axis === "competition") return match.competitionKind || "unknown";
+  return null;
+}
+
+function splitMatches(match, split = activeTournamentSplit()) {
+  if (!split) return true;
+  return match.source === "tournament" && splitKeyForMatch(match, split.axis) === split.key;
+}
+
+function activeSplitLabel() {
+  const option = tournamentSplitOptions().find(([value]) => value === state.tournamentSplit);
+  return option ? option[1].replace(/\s*\(\d+(?:,\d+)*경기\)$/, "") : "대회 전체";
+}
+
+function splitScopedPayload(kind, fallback) {
+  const split = activeTournamentSplit();
+  if (!split) return fallback;
+  const source = DATA.tournamentSplits || {};
+  if (state.patch !== "all") {
+    return source[`${kind}ByPatch`]?.[split.axis]?.[state.patch]?.[split.key] || fallback;
+  }
+  return source[kind]?.[split.axis]?.[split.key] || fallback;
+}
+
 function scopedStats() {
+  const split = activeTournamentSplit();
+  if (split) {
+    return splitScopedPayload("stats", {});
+  }
   if (state.patch !== "all") {
     return DATA.statsByPatch?.[state.patch]?.[state.scope] || {};
   }
@@ -91,6 +173,10 @@ function scopedStats() {
 }
 
 function scopedRelations() {
+  const split = activeTournamentSplit();
+  if (split) {
+    return splitScopedPayload("relationships", { groups: 0, pairs: {}, counters: {} });
+  }
   if (state.patch !== "all") {
     return DATA.relationshipsByPatch?.[state.patch]?.[state.scope] || { groups: 0, pairs: {}, counters: {} };
   }
@@ -98,6 +184,10 @@ function scopedRelations() {
 }
 
 function statOf(id, scope = state.scope) {
+  const split = scope === state.scope ? activeTournamentSplit() : null;
+  if (split) {
+    return (splitScopedPayload("stats", {}) || {})[id] || {};
+  }
   if (state.patch !== "all") {
     return (DATA.statsByPatch?.[state.patch]?.[scope] || {})[id] || {};
   }
@@ -105,6 +195,10 @@ function statOf(id, scope = state.scope) {
 }
 
 function scopedLaneSynergies() {
+  const split = activeTournamentSplit();
+  if (split) {
+    return splitScopedPayload("laneSynergies", {});
+  }
   if (state.patch !== "all") {
     return DATA.laneSynergiesByPatch?.[state.patch]?.[state.scope] || {};
   }
@@ -112,9 +206,14 @@ function scopedLaneSynergies() {
 }
 
 function roleTotalMatches(scope = state.scope, role = state.role) {
+  const split = scope === state.scope ? activeTournamentSplit() : null;
   const stats = state.patch !== "all"
-    ? DATA.statsByPatch?.[state.patch]?.[scope] || {}
-    : DATA.statsByScope?.[scope] || DATA.stats || {};
+    ? split
+      ? splitScopedPayload("stats", {})
+      : DATA.statsByPatch?.[state.patch]?.[scope] || {}
+    : split
+      ? splitScopedPayload("stats", {})
+      : DATA.statsByScope?.[scope] || DATA.stats || {};
   if (role === "all") {
     return Math.max(...Object.values(stats).map((row) => row.totalMatch || 0), 0);
   }
@@ -325,7 +424,7 @@ function tierForMetaRank(entry, index, total) {
 }
 
 function metaTierCacheKey() {
-  return [state.scope, state.patch, state.role, state.tierPreset, state.sampleMode, DATA.generatedAt || ""].join("|");
+  return [state.scope, state.patch, state.role, state.tierPreset, state.sampleMode, state.tournamentSplit, DATA.generatedAt || ""].join("|");
 }
 
 function buildMetaTierCache() {
@@ -503,6 +602,7 @@ function sourceLabel(source) {
   return {
     combined_export: "대회+솔랭",
     meta_exporter_debug: "대회 DB",
+    match_replay_split: "대회 세부",
     solo_rank_export: "솔랭 기록",
     save_news_meta_report: "저장 파일 기사",
     not_collected: "수집 전",
@@ -831,6 +931,17 @@ function renderControls() {
       .map(([value, label]) => `<option value="${value}" ${state.sampleMode === value ? "selected" : ""}>${label}</option>`)
       .join("");
   }
+  const tournamentSplitSelect = document.getElementById("tournamentSplitSelect");
+  if (tournamentSplitSelect) {
+    const options = tournamentSplitOptions();
+    if (!options.some(([value]) => value === state.tournamentSplit)) {
+      state.tournamentSplit = "all";
+    }
+    const selectedSplit = state.scope === "tournament" ? state.tournamentSplit : "all";
+    tournamentSplitSelect.innerHTML = options
+      .map(([value, label]) => `<option value="${value}" ${selectedSplit === value ? "selected" : ""}>${label}</option>`)
+      .join("");
+  }
 }
 
 function renderChampionGrid(champs) {
@@ -860,8 +971,11 @@ function renderSummary(champs) {
   const sampleInfo = effectiveSampleInfo();
   const replayInfo = replayDateInferenceInfo();
   const preset = currentTierPreset();
+  const split = activeTournamentSplit();
+  const splitLabel = split ? activeSplitLabel() : "대회 전체";
   document.getElementById("summaryGrid").innerHTML = `
     <div class="summary-card"><span>범위</span><strong>${scopeLabels[state.scope]}</strong></div>
+    <div class="summary-card"><span>대회 세부 범위</span><strong>${splitLabel}</strong></div>
     <div class="summary-card"><span>패치</span><strong>${state.patch === "all" ? "전체" : state.patch}</strong></div>
     <div class="summary-card"><span>통계 수집 챔피언</span><strong>${collected}</strong></div>
     <div class="summary-card"><span>픽 표본</span><strong>${totalPicks.toLocaleString()}</strong></div>
@@ -1174,6 +1288,10 @@ function scopedMatchAnalysisRows(options = {}) {
   if (state.scope !== "all" && state.scope !== "overall") {
     rows = rows.filter((row) => row.source === state.scope);
   }
+  const split = activeTournamentSplit();
+  if (split) {
+    rows = rows.filter((row) => splitMatches(row, split));
+  }
   return rows;
 }
 
@@ -1272,6 +1390,10 @@ function matchBannedChampion(match, championId) {
 }
 
 function statsForPatchScope(patch, scope = state.scope) {
+  const split = scope === state.scope ? parseTournamentSplit() : null;
+  if (split && state.scope !== "solo") {
+    return DATA.tournamentSplits?.statsByPatch?.[split.axis]?.[patch]?.[split.key] || {};
+  }
   return DATA.statsByPatch?.[patch]?.[scope] || {};
 }
 
@@ -1760,12 +1882,13 @@ function renderChampionView() {
   const synergies = relations.pairs?.[champ.id] || [];
   const counters = relations.counters?.[champ.id] || [];
   const tier = displayTier(stat);
+  const splitLabel = activeTournamentSplit() ? ` · ${activeSplitLabel()}` : "";
   document.getElementById("championView").innerHTML = `
     <div class="detail-head">
       ${championIcon(champ, 76)}
       <div>
         <h2>${champ.name}</h2>
-        <p>${champ.category} · ${champ.tags.join(", ")} · ${scopeLabels[state.scope]}${state.role === "all" ? "" : ` · ${roleLabel(state.role)} 기록`} · ${sourceLabel(stat.source)}</p>
+        <p>${champ.category} · ${champ.tags.join(", ")} · ${scopeLabels[state.scope]}${splitLabel}${state.role === "all" ? "" : ` · ${roleLabel(state.role)} 기록`} · ${sourceLabel(stat.source)}</p>
       </div>
       <span class="tier ${tierClass(tier)}">${tier}</span>
     </div>
@@ -1792,6 +1915,10 @@ function matchSearchText(match) {
     match.id,
     match.version,
     matchDateLabel(match),
+    match.leagueLabel,
+    match.regionLabel,
+    match.divisionLabel,
+    match.competitionKind,
     match.blueTeamId,
     match.redTeamId,
     teamLabel(match, "blue"),
@@ -1850,6 +1977,21 @@ function teamLabel(match, side) {
   const id = side === "blue" ? match.blueTeamId : match.redTeamId;
   const team = match[side];
   return team?.name || `${side === "blue" ? "블루" : "레드"} 팀 #${id ?? "-"}`;
+}
+
+function matchContextLabel(match) {
+  const parts = [];
+  if (match.leagueLabel) {
+    parts.push(match.leagueLabel);
+  } else if (match.regionLabel || match.divisionLabel) {
+    parts.push([match.regionLabel, match.divisionLabel].filter(Boolean).join(" "));
+  }
+  if (match.competitionKind === "international") {
+    parts.push("국제전");
+  } else if (match.scheduleEvent === "LeaguePlayoff") {
+    parts.push("플레이오프");
+  }
+  return parts.length ? parts.join(" · ") : "대회";
 }
 
 function totalDeaths(team) {
@@ -1992,7 +2134,7 @@ function renderMatchList(rows) {
       return `<button class="match-list-item ${active ? "active" : ""}" data-match="${match.id}">
         <span>#${match.id} · ${matchDateLabel(match)}</span>
         <strong>${teamLabel(match, "blue")} ${match.blue.killsTotal}:${match.red.killsTotal} ${teamLabel(match, "red")}</strong>
-        <small>패치 ${match.version} · 경기시간 ${durationLabel(match.durationSec)} · ${match.winner === "blue" ? "블루 승" : "레드 승"}</small>
+        <small>${matchContextLabel(match)} · 패치 ${match.version} · 경기시간 ${durationLabel(match.durationSec)} · ${match.winner === "blue" ? "블루 승" : "레드 승"}</small>
       </button>`;
     })
     .join("")}</div>`;
@@ -2129,7 +2271,7 @@ function renderMatchView() {
         ${replayNameNotice()}
         <div class="match-title">
           <div>
-            <small>Replay #${match.id} · ${matchDateLabel(match)} · 패치 ${match.version} · 경기시간 ${durationLabel(match.durationSec)}</small>
+            <small>Replay #${match.id} · ${matchDateLabel(match)} · ${matchContextLabel(match)} · 패치 ${match.version} · 경기시간 ${durationLabel(match.durationSec)}</small>
             <h2>${teamLabel(match, "blue")} vs ${teamLabel(match, "red")}</h2>
           </div>
           <span class="pill ${match.winner === "blue" ? "blue-pill" : "red-pill"}">${match.winner === "blue" ? "블루 승리" : "레드 승리"}</span>
@@ -2210,6 +2352,16 @@ document.getElementById("tierPresetSelect")?.addEventListener("change", (event) 
 document.getElementById("sampleModeSelect")?.addEventListener("change", (event) => {
   state.sampleMode = event.target.value;
   writeStoredSetting("tfm2:sampleMode", state.sampleMode);
+  render();
+});
+
+document.getElementById("tournamentSplitSelect")?.addEventListener("change", (event) => {
+  state.tournamentSplit = event.target.value;
+  if (state.tournamentSplit !== "all") {
+    state.scope = "tournament";
+  }
+  writeStoredSetting("tfm2:tournamentSplit", state.tournamentSplit);
+  state.matchDate = "all";
   render();
 });
 

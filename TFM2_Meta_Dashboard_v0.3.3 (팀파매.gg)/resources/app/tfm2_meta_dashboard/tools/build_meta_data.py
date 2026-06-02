@@ -33,6 +33,15 @@ DATE_VERSION_RE = re.compile(r"^\d{4}\.\d+\.\d+$")
 POSITION_NAMES = ["top", "jungle", "mid", "bot", "support"]
 POSITION_FIELD_NAMES = {"top": "top", "jungle": "jungle", "mid": "mid", "bot": "bottom", "support": "support"}
 BUILD_DIRECTIONS = {"AD", "Magic", "AttackSpeed", "Defense", "MagicResistance", "Hp", "Auto"}
+LEAGUE_REGION_LABELS = {
+    "tack": "한국",
+    "tacc": "중국",
+    "tace": "유럽",
+    "taca": "북미",
+    "tacs": "남미",
+    "tacj": "일본",
+}
+LEAGUE_KEY_FALLBACKS = ["tack", "tacc", "tace", "taca", "tacs", "tacj"]
 
 
 def version_sort_key(version):
@@ -433,7 +442,8 @@ APPDATA = next((root for root in APPDATA_ROOTS if (root / "data").exists()), APP
 SAVE_DIRS = [root / "data" for root in APPDATA_ROOTS]
 DIAG_DIRS = [root / "diagnostics" for root in APPDATA_ROOTS]
 DIAG_DIR = next((path for path in DIAG_DIRS if path.exists()), APPDATA / "diagnostics")
-if os.environ.get("TFM2_META_EXPORT_DIR"):
+EXPLICIT_EXPORT_DIR = bool(os.environ.get("TFM2_META_EXPORT_DIR"))
+if EXPLICIT_EXPORT_DIR:
     EXPORT_DIR = Path(os.environ["TFM2_META_EXPORT_DIR"]).expanduser().resolve()
 else:
     EXPORT_DIR = next((path / "meta_export" for path in DIAG_DIRS if (path / "meta_export").exists()), DIAG_DIR / "meta_export")
@@ -730,12 +740,77 @@ def parse_debug_team_metadata(path: Path):
         team_id = parse_first_int(block, "id")
         if team_id is None:
             continue
+        league_keys = re.findall(r"#asset/base/text/ui\?league\.([A-Za-z0-9_]+)", block)
+        league_key = Counter(league_keys).most_common(1)[0][0] if league_keys else None
         teams[team_id] = {
             "id": team_id,
             "name": parse_quoted_field(block, "name"),
             "leagueId": parse_first_int(block, "league_id"),
+            "leagueKey": league_key,
         }
     return teams
+
+
+def derive_league_key(league_id, league_key=None):
+    if league_key:
+        return league_key
+    if league_id is None:
+        return None
+    base = LEAGUE_KEY_FALLBACKS[league_id % len(LEAGUE_KEY_FALLBACKS)]
+    return f"{base}2" if league_id >= len(LEAGUE_KEY_FALLBACKS) else base
+
+
+def league_context_from_key(league_id, league_key=None):
+    resolved_key = derive_league_key(league_id, league_key)
+    if not resolved_key:
+        return {
+            "leagueId": league_id,
+            "leagueKey": None,
+            "regionKey": None,
+            "regionLabel": "지역 미확인",
+            "division": None,
+            "divisionLabel": "등급 미확인",
+            "leagueLabel": f"리그 {league_id}" if league_id is not None else "리그 미확인",
+        }
+    division_match = re.fullmatch(r"(.+?)(2)?", resolved_key)
+    region_key = division_match.group(1) if division_match else resolved_key.rstrip("2")
+    division = 2 if resolved_key.endswith("2") else 1
+    region_label = LEAGUE_REGION_LABELS.get(region_key, region_key.upper())
+    division_label = f"{division}부"
+    return {
+        "leagueId": league_id,
+        "leagueKey": resolved_key,
+        "regionKey": region_key,
+        "regionLabel": region_label,
+        "division": division,
+        "divisionLabel": division_label,
+        "leagueLabel": f"{region_label} {division_label}",
+    }
+
+
+def build_league_meta(team_meta):
+    league_keys = defaultdict(Counter)
+    for team in team_meta.values():
+        league_id = team.get("leagueId")
+        league_key = team.get("leagueKey")
+        if league_id is not None and league_key:
+            league_keys[league_id][league_key] += 1
+
+    meta = {}
+    for league_id in sorted({team.get("leagueId") for team in team_meta.values() if team.get("leagueId") is not None}):
+        league_key = league_keys[league_id].most_common(1)[0][0] if league_keys.get(league_id) else None
+        meta[league_id] = league_context_from_key(league_id, league_key)
+    return meta
+
+
+def competition_kind_for_event(event):
+    if event == "LeagueMatch":
+        return "league_regular"
+    if event == "LeaguePlayoff":
+        return "league_playoff"
+    if event in {"TournamentGroupMatch", "TournamentMatch"}:
+        return "international"
+    return "unknown"
 
 
 def parse_enum_field(text, field):
@@ -842,6 +917,7 @@ def infer_replay_dates(export_dir: Path):
         "patchEvents": [],
     }
     team_meta = parse_debug_team_metadata(export_dir / "teams.debug.txt")
+    league_meta = build_league_meta(team_meta)
     match_stats = parse_match_stats_for_date_inference(export_dir / "match_stats.debug.txt")
     schedule = parse_year_schedule_metadata(export_dir / "year_schedules.debug.txt")
     competition_types = parse_league_competition_types(export_dir / "league_competitions.debug.txt")
@@ -892,6 +968,8 @@ def infer_replay_dates(export_dir: Path):
         if not schedule_row:
             continue
 
+        league_context = league_meta.get(league_id) or league_context_from_key(league_id)
+        competition_kind = competition_kind_for_event(event_kind)
         for row in item["rows"]:
             replay_dates[row["id"]] = {
                 "date": schedule_row["date"],
@@ -900,10 +978,17 @@ def infer_replay_dates(export_dir: Path):
                 "dateSource": "league_schedule_inferred",
                 "dateConfidence": "high",
                 "leagueId": league_id,
+                "leagueKey": league_context.get("leagueKey"),
+                "regionKey": league_context.get("regionKey"),
+                "regionLabel": league_context.get("regionLabel"),
+                "division": league_context.get("division"),
+                "divisionLabel": league_context.get("divisionLabel"),
+                "leagueLabel": league_context.get("leagueLabel"),
                 "leagueType": league_type,
                 "leagueRound": schedule_row.get("round"),
                 "leagueIndex": schedule_row.get("index"),
                 "scheduleEvent": event_kind,
+                "competitionKind": competition_kind,
                 "seriesId": series_index,
             }
             assigned += 1
@@ -2043,6 +2128,8 @@ def parse_match_team_details(team_text, champion_ids, perf, save_lookup, item_ca
                 "dealt": array_at(perf["deals"], perf_index),
                 "lineGold": array_at(perf["lineGold"], perf_index),
                 "lineCs": array_at(perf["lineCs"], perf_index),
+                "gold": array_at(perf["lineGold"], perf_index),
+                "cs": array_at(perf["lineCs"], perf_index),
                 "itemIds": item_ids,
                 "itemIcons": [item["icon"] for item in item_details if item.get("icon")],
                 "itemNames": [item["name"] for item in item_details if item.get("name")],
@@ -2055,7 +2142,17 @@ def parse_match_team_details(team_text, champion_ids, perf, save_lookup, item_ca
     return players
 
 
-def parse_match_analysis(path: Path, champion_ids, save_lookup, solo_replay_ids=None, limit=600, item_catalog=None, replay_dates=None):
+def parse_match_analysis(
+    path: Path,
+    champion_ids,
+    save_lookup,
+    solo_replay_ids=None,
+    limit=600,
+    item_catalog=None,
+    replay_dates=None,
+    team_meta=None,
+    league_meta=None,
+):
     if not path.exists():
         return []
     text = path.read_text(encoding="utf-8", errors="ignore")
@@ -2088,6 +2185,21 @@ def parse_match_analysis(path: Path, champion_ids, save_lookup, solo_replay_ids=
         blue_team_id = parse_first_int(block, "blue_team_id")
         red_team_id = parse_first_int(block, "red_team_id")
         date_info = (replay_dates or {}).get(replay_id) or {}
+        blue_team_meta = (team_meta or {}).get(blue_team_id, {})
+        red_team_meta = (team_meta or {}).get(red_team_id, {})
+        blue_league_id = blue_team_meta.get("leagueId")
+        red_league_id = red_team_meta.get("leagueId")
+        league_id = date_info.get("leagueId")
+        if league_id is None and blue_league_id == red_league_id:
+            league_id = blue_league_id
+        league_context = (league_meta or {}).get(league_id) or league_context_from_key(
+            league_id,
+            date_info.get("leagueKey") or blue_team_meta.get("leagueKey") or red_team_meta.get("leagueKey"),
+        )
+        schedule_event = date_info.get("scheduleEvent")
+        competition_kind = date_info.get("competitionKind") or competition_kind_for_event(schedule_event)
+        if competition_kind == "unknown" and blue_league_id is not None and red_league_id is not None and blue_league_id != red_league_id:
+            competition_kind = "international"
         blue = compact_performance(blue_perf)
         red = compact_performance(red_perf)
         blue.update(
@@ -2114,11 +2226,20 @@ def parse_match_analysis(path: Path, champion_ids, save_lookup, solo_replay_ids=
                 "dateLabel": date_info.get("dateLabel") or "date not exported",
                 "dateSource": date_info.get("dateSource") or "unknown",
                 "dateConfidence": date_info.get("dateConfidence") or "none",
-                "leagueId": date_info.get("leagueId"),
+                "leagueId": league_id,
+                "leagueKey": league_context.get("leagueKey"),
+                "regionKey": league_context.get("regionKey"),
+                "regionLabel": league_context.get("regionLabel"),
+                "division": league_context.get("division"),
+                "divisionLabel": league_context.get("divisionLabel"),
+                "leagueLabel": league_context.get("leagueLabel"),
+                "blueLeagueId": blue_league_id,
+                "redLeagueId": red_league_id,
                 "leagueType": date_info.get("leagueType"),
                 "leagueRound": date_info.get("leagueRound"),
                 "leagueIndex": date_info.get("leagueIndex"),
-                "scheduleEvent": date_info.get("scheduleEvent"),
+                "scheduleEvent": schedule_event,
+                "competitionKind": competition_kind,
                 "seriesId": date_info.get("seriesId"),
                 "gameTick": game_tick,
                 "durationSec": round(game_tick / 51),
@@ -2264,6 +2385,128 @@ class LanePairAccumulator:
         return out
 
 
+def aggregate_match_analysis_stats(champions, rows, draft_scan, item_catalog=None):
+    champion_ids = {champ["id"] for champ in champions}
+    stats = defaultdict(blank_stat)
+    total_matches = 0
+    for match in rows:
+        if match.get("source") != "tournament":
+            continue
+        blue = match.get("blue") or {}
+        red = match.get("red") or {}
+        blue_players = blue.get("players") or []
+        red_players = red.get("players") or []
+        if not blue_players or not red_players:
+            continue
+        total_matches += 1
+        winner = match.get("winner")
+        for ban in (blue.get("bans") or []) + (red.get("bans") or []):
+            if ban in champion_ids:
+                stats[ban]["banCount"] += 1
+        for player in blue_players:
+            champion = player.get("champion")
+            if champion in champion_ids:
+                add_player_stat(stats, champion, winner == "blue", player, "match_replay_split")
+        for player in red_players:
+            champion = player.get("champion")
+            if champion in champion_ids:
+                add_player_stat(stats, champion, winner == "red", player, "match_replay_split")
+
+    finalized = finalize_aggregated_stats(stats, total_matches, "match_replay_split", item_catalog)
+    return normalize_scope(champions, finalized, draft_scan)
+
+
+def aggregate_match_analysis_relationships(rows):
+    relations = RelationAccumulator()
+    lane_synergies = LanePairAccumulator()
+    for match in rows:
+        if match.get("source") != "tournament":
+            continue
+        blue_players = (match.get("blue") or {}).get("players") or []
+        red_players = (match.get("red") or {}).get("players") or []
+        if not blue_players or not red_players:
+            continue
+        blue_win = match.get("winner") == "blue"
+        relations.record([p["champion"] for p in blue_players], [p["champion"] for p in red_players], blue_win)
+        lane_synergies.record(blue_players, blue_win)
+        lane_synergies.record(red_players, not blue_win)
+    return relations.to_payload(), lane_synergies.to_payload()
+
+
+def split_key_for_match(match, axis):
+    if axis == "league":
+        league_id = match.get("leagueId")
+        return str(league_id) if league_id is not None else None
+    if axis == "region":
+        return match.get("regionKey")
+    if axis == "division":
+        division = match.get("division")
+        return str(division) if division is not None else None
+    if axis == "regionDivision":
+        region = match.get("regionKey")
+        division = match.get("division")
+        return f"{region}:{division}" if region and division is not None else None
+    if axis == "competition":
+        return match.get("competitionKind") or "unknown"
+    return None
+
+
+def build_match_analysis_split_payload(champions, rows, draft_scan, item_catalog=None):
+    axes = ["league", "region", "division", "regionDivision", "competition"]
+    grouped = {axis: defaultdict(list) for axis in axes}
+    grouped_by_patch = {axis: defaultdict(lambda: defaultdict(list)) for axis in axes}
+    counts = {axis: Counter() for axis in axes}
+
+    for match in rows:
+        version = match.get("version") or "unknown"
+        for axis in axes:
+            key = split_key_for_match(match, axis)
+            if not key:
+                continue
+            grouped[axis][key].append(match)
+            grouped_by_patch[axis][version][key].append(match)
+            counts[axis][key] += 1
+
+    def stats_payload(groups):
+        return {
+            key: aggregate_match_analysis_stats(champions, group_rows, draft_scan, item_catalog)
+            for key, group_rows in sorted(groups.items(), key=lambda item: item[0])
+        }
+
+    def relationship_payload(groups):
+        out = {}
+        lane_out = {}
+        for key, group_rows in sorted(groups.items(), key=lambda item: item[0]):
+            rel, lane = aggregate_match_analysis_relationships(group_rows)
+            out[key] = rel
+            lane_out[key] = lane
+        return out, lane_out
+
+    stats = {axis: stats_payload(grouped[axis]) for axis in axes}
+    relationships = {}
+    lane_synergies = {}
+    for axis in axes:
+        relationships[axis], lane_synergies[axis] = relationship_payload(grouped[axis])
+
+    stats_by_patch = {axis: {} for axis in axes}
+    relationships_by_patch = {axis: {} for axis in axes}
+    lane_synergies_by_patch = {axis: {} for axis in axes}
+    for axis in axes:
+        for version, groups in sorted(grouped_by_patch[axis].items(), key=lambda item: version_sort_key(item[0])):
+            stats_by_patch[axis][version] = stats_payload(groups)
+            relationships_by_patch[axis][version], lane_synergies_by_patch[axis][version] = relationship_payload(groups)
+
+    return {
+        "stats": stats,
+        "statsByPatch": stats_by_patch,
+        "relationships": relationships,
+        "relationshipsByPatch": relationships_by_patch,
+        "laneSynergies": lane_synergies,
+        "laneSynergiesByPatch": lane_synergies_by_patch,
+        "counts": {axis: dict(counter) for axis, counter in counts.items()},
+    }
+
+
 def load_replay_summary_count(export_usable=True):
     if not export_usable:
         return 0
@@ -2359,7 +2602,7 @@ def inspect_meta_export():
         data_paths = [path for path in meta_export_data_paths() if path.exists()]
         if data_paths and not manifest_path.exists():
             reason = "export_data_without_manifest"
-        elif data_paths and manifest_path.exists():
+        elif data_paths and manifest_path.exists() and not EXPLICIT_EXPORT_DIR:
             manifest_time = manifest_path.stat().st_mtime
             stale = [path.name for path in data_paths if path.stat().st_mtime + 1 < manifest_time]
             if stale:
@@ -2699,6 +2942,8 @@ def main():
     )
     if meta_export_status["usable"]:
         replay_date_lookup, replay_date_status = infer_replay_dates(EXPORT_DIR)
+        team_meta = parse_debug_team_metadata(EXPORT_DIR / "teams.debug.txt")
+        league_meta = build_league_meta(team_meta)
     else:
         replay_date_lookup, replay_date_status = (
             {},
@@ -2716,6 +2961,8 @@ def main():
                 "patchEvents": [],
             },
         )
+        team_meta = {}
+        league_meta = {}
     print(
         "Replay date inference: "
         f"assigned={replay_date_status.get('assigned', 0)}/"
@@ -2775,7 +3022,10 @@ def main():
             limit=None,
             item_catalog=item_catalog,
             replay_dates=replay_date_lookup,
+            team_meta=team_meta,
+            league_meta=league_meta,
         )
+        tournament_splits = build_match_analysis_split_payload(champions, full_match_analysis, draft_scan, item_catalog)
         match_analysis = full_match_analysis[:600]
     else:
         empty_rel = {"groups": 0, "pairs": {}, "counters": {}}
@@ -2793,6 +3043,7 @@ def main():
         tournament_lane_synergies_by_version = {}
         full_match_analysis = []
         match_analysis = []
+        tournament_splits = build_match_analysis_split_payload(champions, full_match_analysis, draft_scan, item_catalog)
     combined_stats = combine_scope_stats(champions, tournament_stats, solo_stats, draft_scan, item_catalog)
 
     for scope_stats in [tournament_stats, solo_stats, combined_stats]:
@@ -2864,6 +3115,26 @@ def main():
 
     generated_at = datetime.now().isoformat(timespec="seconds")
     core_item_builds = build_core_item_builds(full_match_analysis, generated_at, save_path, patch_versions, item_catalog)
+    region_order = {key: index for index, key in enumerate(LEAGUE_KEY_FALLBACKS)}
+    league_meta_list = sorted(
+        league_meta.values(),
+        key=lambda row: (
+            region_order.get(row.get("regionKey"), 99),
+            row.get("division") or 0,
+            row.get("leagueId") or 0,
+        ),
+    )
+    region_meta = {}
+    for row in league_meta_list:
+        region_key = row.get("regionKey")
+        if region_key and region_key not in region_meta:
+            region_meta[region_key] = {"regionKey": region_key, "label": row.get("regionLabel") or region_key}
+    competition_meta = [
+        {"key": "league_regular", "label": "리그전"},
+        {"key": "league_playoff", "label": "플레이오프"},
+        {"key": "international", "label": "국제전"},
+        {"key": "unknown", "label": "미확인"},
+    ]
 
     payload = {
         "generatedAt": generated_at,
@@ -2902,10 +3173,18 @@ def main():
             "coreItemBuilds": str(CORE_ITEM_BUILDS_OUT),
             "coreItemBuildsMod": str(CORE_ITEM_BUILDS_MOD_OUT),
             "coreItemBuildsTournamentMatches": core_item_builds["sources"]["tournamentMatches"],
+            "leagueSplitMatches": tournament_splits["counts"].get("league", {}),
         },
         "saveLookup": save_lookup,
         "replayDateInference": replay_date_status,
         "itemCatalog": item_catalog,
+        "leagueMeta": {
+            "leagues": league_meta_list,
+            "regions": sorted(region_meta.values(), key=lambda row: region_order.get(row["regionKey"], 99)),
+            "divisions": [{"key": "1", "label": "1부"}, {"key": "2", "label": "2부"}],
+            "competitions": competition_meta,
+            "counts": tournament_splits["counts"],
+        },
         "patches": patch_versions,
         "currentPatch": current_patch,
         "champions": champions,
@@ -2917,6 +3196,7 @@ def main():
             "solo": solo_stats,
         },
         "statsByPatch": stats_by_patch,
+        "tournamentSplits": tournament_splits,
         "relationships": overall_relationships["pairs"],
         "relationshipsByScope": {
             "overall": overall_relationships,
