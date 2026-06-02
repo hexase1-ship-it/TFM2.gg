@@ -157,6 +157,7 @@ if ($BuildExe) {
     if (-not $pyinstaller) {
         python -m pip install pyinstaller
     }
+    python -m pip install certifi
 
     $exeDist = Join-Path $outRoot "pyinstaller-dist"
     $buildDir = Join-Path $outRoot "pyinstaller-build"
@@ -170,6 +171,8 @@ if ($BuildExe) {
         --distpath $exeDist `
         --workpath $buildDir `
         --specpath $specDir `
+        --hidden-import "certifi" `
+        --collect-data "certifi" `
         $installerSrc
 
     $builtExe = Join-Path $exeDist "TFM2GGInstaller.exe"

@@ -5,6 +5,7 @@ import os
 import queue
 import re
 import shutil
+import ssl
 import subprocess
 import sys
 import tempfile
@@ -26,6 +27,8 @@ MOD_ID = "tfm2_meta_item_delegate"
 REPO_FULL_NAME = "hexase1-ship-it/TFM2.gg"
 RELEASE_API = f"https://api.github.com/repos/{REPO_FULL_NAME}/releases/latest"
 RELEASE_ASSET_NAME = "TFM2.gg_Distribution.zip"
+RELEASE_PAGE_URL = f"https://github.com/{REPO_FULL_NAME}/releases/tag/latest"
+DIRECT_DOWNLOAD_URL = f"https://github.com/{REPO_FULL_NAME}/releases/download/latest/{RELEASE_ASSET_NAME}"
 TARGET_GAME_VERSION = "0.4.7"
 PACKAGE_LAYOUT_VERSION = 2
 DASHBOARD_INSTALL_DIR_NAME = APP_NAME
@@ -189,6 +192,10 @@ def dir_size(path: Path) -> int:
             except OSError:
                 pass
     return total
+
+
+class RemoteUpdateError(RuntimeError):
+    pass
 
 
 class InstallerModel:
@@ -647,27 +654,256 @@ class InstallerModel:
         token = result.stdout.strip()
         return token or None
 
-    def request_json(self, url: str) -> dict:
-        req = urllib.request.Request(url)
-        req.add_header("User-Agent", f"{APP_NAME}-Installer")
+    def request_headers(self, api_asset: bool = False) -> dict[str, str]:
+        headers = {
+            "User-Agent": f"{APP_NAME}-Installer",
+        }
         token = self.github_token()
         if token:
-            req.add_header("Authorization", f"Bearer {token}")
-        with urllib.request.urlopen(req, timeout=20) as response:
-            return json.loads(response.read().decode("utf-8"))
-
-    def download_url(self, url: str, dst: Path, api_asset: bool = False) -> None:
-        req = urllib.request.Request(url)
-        req.add_header("User-Agent", f"{APP_NAME}-Installer")
-        token = self.github_token()
-        if token:
-            req.add_header("Authorization", f"Bearer {token}")
+            headers["Authorization"] = f"Bearer {token}"
         if api_asset:
-            req.add_header("Accept", "application/octet-stream")
-        with urllib.request.urlopen(req, timeout=90) as response:
+            headers["Accept"] = "application/octet-stream"
+        return headers
+
+    def request(self, url: str, headers: dict[str, str]) -> urllib.request.Request:
+        req = urllib.request.Request(url)
+        for key, value in headers.items():
+            req.add_header(key, value)
+        return req
+
+    def is_certificate_error(self, exc: BaseException) -> bool:
+        seen: set[int] = set()
+        stack: list[object] = [exc]
+        while stack:
+            current = stack.pop()
+            if current is None:
+                continue
+            marker = id(current)
+            if marker in seen:
+                continue
+            seen.add(marker)
+            if isinstance(current, ssl.SSLCertVerificationError):
+                return True
+            if isinstance(current, ssl.SSLError) and "CERTIFICATE_VERIFY_FAILED" in str(current):
+                return True
+            if "CERTIFICATE_VERIFY_FAILED" in str(current):
+                return True
+            for attr in ("reason", "__cause__", "__context__"):
+                value = getattr(current, attr, None)
+                if value is not None:
+                    stack.append(value)
+        return False
+
+    def certifi_ssl_context(self) -> ssl.SSLContext | None:
+        try:
+            import certifi  # type: ignore
+            return ssl.create_default_context(cafile=certifi.where())
+        except Exception:
+            return None
+
+    def remote_update_error(self, url: str, errors: list[BaseException]) -> RemoteUpdateError:
+        details = "\n".join(f"- {type(error).__name__}: {error}" for error in errors[-3:])
+        if any(self.is_certificate_error(error) for error in errors):
+            return RemoteUpdateError(
+                "원격 업데이트 HTTPS 인증서 검증에 실패했습니다.\n\n"
+                "Windows 루트 인증서가 오래되었거나, 백신/보안 프로그램/VPN/프록시가 HTTPS 인증서를 가로채는 환경일 수 있습니다.\n"
+                "설치/복구/제거 기능은 계속 사용할 수 있습니다.\n\n"
+                f"직접 다운로드: {DIRECT_DOWNLOAD_URL}\n"
+                f"릴리스 페이지: {RELEASE_PAGE_URL}\n\n"
+                f"세부 오류:\n{details}"
+            )
+        return RemoteUpdateError(
+            "원격 업데이트 서버에 연결하지 못했습니다.\n\n"
+            "네트워크, VPN/프록시, 방화벽, GitHub 접속 상태를 확인해 주세요.\n"
+            f"직접 다운로드: {DIRECT_DOWNLOAD_URL}\n\n"
+            f"세부 오류:\n{details}"
+        )
+
+    def urllib_read(self, url: str, headers: dict[str, str], timeout: int, context: ssl.SSLContext | None = None) -> bytes:
+        with urllib.request.urlopen(self.request(url, headers), timeout=timeout, context=context) as response:
+            return response.read()
+
+    def urllib_download(self, url: str, dst: Path, headers: dict[str, str], timeout: int, context: ssl.SSLContext | None = None) -> None:
+        with urllib.request.urlopen(self.request(url, headers), timeout=timeout, context=context) as response:
             dst.parent.mkdir(parents=True, exist_ok=True)
             with dst.open("wb") as fh:
                 shutil.copyfileobj(response, fh)
+
+    def powershell_exe(self) -> str | None:
+        return shutil.which("powershell.exe") or shutil.which("pwsh.exe")
+
+    def powershell_download(self, url: str, dst: Path, headers: dict[str, str], timeout: int) -> None:
+        ps = self.powershell_exe()
+        if not ps:
+            raise RuntimeError("PowerShell executable not found")
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        headers_fd, headers_name = tempfile.mkstemp(prefix="tfm2gg-headers-", suffix=".json")
+        os.close(headers_fd)
+        headers_file = Path(headers_name)
+        try:
+            headers_file.write_text(json.dumps(headers), encoding="utf-8")
+            script = r'''
+param(
+    [string]$Url,
+    [string]$OutFile,
+    [string]$HeadersFile
+)
+$ErrorActionPreference = "Stop"
+[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+$headers = @{}
+if ($HeadersFile -and (Test-Path -LiteralPath $HeadersFile)) {
+    $raw = Get-Content -LiteralPath $HeadersFile -Raw -Encoding UTF8
+    if ($raw) {
+        $parsed = ConvertFrom-Json -InputObject $raw
+        foreach ($property in $parsed.PSObject.Properties) {
+            $headers[$property.Name] = [string]$property.Value
+        }
+    }
+}
+Invoke-WebRequest -Uri $Url -OutFile $OutFile -Headers $headers -UseBasicParsing -MaximumRedirection 10
+'''
+            result = subprocess.run(
+                [ps, "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", script, url, str(dst), str(headers_file)],
+                capture_output=True,
+                text=True,
+                timeout=max(timeout + 30, 60),
+                creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0,
+            )
+            if result.returncode != 0:
+                output = (result.stderr or result.stdout or "").strip()
+                raise RuntimeError(output or f"PowerShell exited with {result.returncode}")
+            if not dst.exists() or dst.stat().st_size <= 0:
+                raise RuntimeError("PowerShell download produced an empty file")
+        finally:
+            try:
+                headers_file.unlink(missing_ok=True)
+            except OSError:
+                pass
+
+    def read_url(self, url: str, headers: dict[str, str], timeout: int) -> bytes:
+        errors: list[BaseException] = []
+        try:
+            return self.urllib_read(url, headers, timeout)
+        except urllib.error.HTTPError:
+            raise
+        except Exception as exc:
+            errors.append(exc)
+
+        if self.is_certificate_error(errors[-1]):
+            context = self.certifi_ssl_context()
+            if context is not None:
+                try:
+                    return self.urllib_read(url, headers, timeout, context)
+                except urllib.error.HTTPError:
+                    raise
+                except Exception as exc:
+                    errors.append(exc)
+
+        temp_fd, temp_name = tempfile.mkstemp(prefix="tfm2gg-update-", suffix=".download")
+        os.close(temp_fd)
+        temp_path = Path(temp_name)
+        try:
+            try:
+                self.powershell_download(url, temp_path, headers, timeout)
+                return temp_path.read_bytes()
+            except Exception as exc:
+                errors.append(exc)
+                raise self.remote_update_error(url, errors) from exc
+        finally:
+            try:
+                temp_path.unlink(missing_ok=True)
+            except OSError:
+                pass
+
+    def request_json(self, url: str) -> dict:
+        data = self.read_url(url, self.request_headers(), timeout=20)
+        return json.loads(data.decode("utf-8"))
+
+    def download_url(self, url: str, dst: Path, api_asset: bool = False) -> None:
+        if not url:
+            raise RemoteUpdateError("원격 업데이트 다운로드 URL을 찾지 못했습니다.")
+        headers = self.request_headers(api_asset=api_asset)
+        part = dst.with_name(dst.name + ".part")
+        errors: list[BaseException] = []
+
+        def remove_part() -> None:
+            try:
+                part.unlink(missing_ok=True)
+            except OSError:
+                pass
+
+        def attempt_urllib(context: ssl.SSLContext | None = None) -> bool:
+            remove_part()
+            try:
+                self.urllib_download(url, part, headers, timeout=90, context=context)
+                return True
+            except urllib.error.HTTPError:
+                raise
+            except Exception as exc:
+                errors.append(exc)
+                remove_part()
+                return False
+
+        remove_part()
+        downloaded = False
+        try:
+            downloaded = attempt_urllib()
+            if not downloaded and self.is_certificate_error(errors[-1]):
+                context = self.certifi_ssl_context()
+                if context is not None:
+                    downloaded = attempt_urllib(context)
+                else:
+                    errors.append(RuntimeError("certifi CA bundle is unavailable"))
+
+            if not downloaded:
+                remove_part()
+                try:
+                    self.powershell_download(url, part, headers, timeout=90)
+                    downloaded = True
+                except Exception as ps_exc:
+                    errors.append(ps_exc)
+                    raise self.remote_update_error(url, errors) from ps_exc
+
+            if not part.exists() or part.stat().st_size <= 0:
+                raise RemoteUpdateError("원격 업데이트 ZIP 다운로드 결과가 비어 있습니다.")
+            os.replace(part, dst)
+        finally:
+            remove_part()
+
+    def validate_update_zip(self, zip_path: Path) -> None:
+        try:
+            with zipfile.ZipFile(zip_path, "r") as archive:
+                bad_member = archive.testzip()
+        except zipfile.BadZipFile as exc:
+            raise RemoteUpdateError("다운로드된 업데이트 ZIP 파일이 손상되었거나 ZIP 형식이 아닙니다.") from exc
+        if bad_member:
+            raise RemoteUpdateError(f"다운로드된 업데이트 ZIP 파일에 손상된 항목이 있습니다: {bad_member}")
+
+    def validate_remote_package(self, package: Path) -> dict:
+        manifest = self.remote_manifest(package)
+        if not manifest:
+            raise RemoteUpdateError("원격 업데이트 패키지에서 package_manifest.json을 찾지 못했습니다.")
+        repository = str(manifest.get("repository") or manifest.get("repo") or "").strip()
+        if repository and repository.lower() != REPO_FULL_NAME.lower():
+            raise RemoteUpdateError(f"원격 업데이트 패키지 저장소가 일치하지 않습니다: {repository}")
+        layout_version = self.manifest_layout_version(manifest)
+        if layout_version < PACKAGE_LAYOUT_VERSION:
+            raise RemoteUpdateError(
+                f"원격 업데이트 패키지 구조가 오래되었습니다. 필요: {PACKAGE_LAYOUT_VERSION}, 실제: {layout_version or '-'}"
+            )
+        payload = self.payload_root(package)
+        required_paths = [
+            payload / "dashboard_shell" / DASHBOARD_EXE_NAME,
+            payload / "dashboard_app" / "main.cjs",
+            payload / "dashboard_app" / "tfm2_meta_dashboard",
+            payload / "mods" / MOD_ID / "tfm2_meta_item_delegate.dll",
+            payload / "README.md",
+        ]
+        missing = [path for path in required_paths if not path.exists()]
+        if missing:
+            names = "\n".join(f"- {path.relative_to(package)}" for path in missing)
+            raise RemoteUpdateError(f"원격 업데이트 패키지에 필요한 파일이 없습니다.\n{names}")
+        return manifest
 
     def download_latest_distribution(self) -> tuple[Path, dict]:
         release = self.request_json(RELEASE_API)
@@ -693,6 +929,7 @@ class InstallerModel:
             self.download_url(download_url, target_zip, api_asset=True)
         else:
             self.download_url(download_url, target_zip)
+        self.validate_update_zip(target_zip)
 
         extract_root = local_update_dir() / safe_tag / "extracted"
         if extract_root.exists():
@@ -702,6 +939,7 @@ class InstallerModel:
             archive.extractall(extract_root)
 
         package = self.find_extracted_package(extract_root)
+        self.validate_remote_package(package)
         self.remote_root = package
         return package, release
 
@@ -982,6 +1220,8 @@ class Tfm2InstallerApp(tk.Tk):
                     self.work_queue.put(("remote_apply", (package, release, current_version, remote_version, reason)))
             self.work_queue.put(("refresh", None))
             self.work_queue.put(("done", kind))
+        except RemoteUpdateError as exc:
+            self.work_queue.put(("error", str(exc)))
         except PermissionError as exc:
             self.work_queue.put(("error", f"권한 오류: 관리자 권한으로 다시 실행하세요.\n{exc}"))
         except urllib.error.HTTPError as exc:
