@@ -26,6 +26,30 @@ REPO_FULL_NAME = "hexase1-ship-it/TFM2.gg"
 RELEASE_API = f"https://api.github.com/repos/{REPO_FULL_NAME}/releases/latest"
 RELEASE_ASSET_NAME = "TFM2.gg_Distribution.zip"
 TARGET_GAME_VERSION = "0.4.7"
+DASHBOARD_EXE_NAME = "TFM2MetaDashboard.exe"
+DASHBOARD_SHELL_DEFAULT_ITEMS = (
+    DASHBOARD_EXE_NAME,
+    "locales",
+    "chrome_100_percent.pak",
+    "chrome_200_percent.pak",
+    "d3dcompiler_47.dll",
+    "dxcompiler.dll",
+    "dxil.dll",
+    "ffmpeg.dll",
+    "icudtl.dat",
+    "libEGL.dll",
+    "libGLESv2.dll",
+    "LICENSE",
+    "LICENSES.chromium.html",
+    "resources.pak",
+    "snapshot_blob.bin",
+    "v8_context_snapshot.bin",
+    "version",
+    "vk_swiftshader.dll",
+    "vk_swiftshader_icd.json",
+    "vulkan-1.dll",
+)
+DASHBOARD_SHELL_EXCLUDED_NAMES = {"resources"}
 MOD_PACKAGE_DIR_NAME = "tfm2_meta_item_delegate (팀파매.gg 통계 아이템 자동 설정 애드온 모드)"
 SOURCE_DASHBOARD_DIR_NAME = "TFM2_Meta_Dashboard_v0.3.3 (팀파매.gg)"
 
@@ -104,6 +128,22 @@ def copy_dir(src: Path, dst: Path) -> None:
     shutil.copytree(src, dst, dirs_exist_ok=True)
 
 
+def copy_dashboard_shell_contents(src: Path, dst: Path) -> None:
+    exe = src / DASHBOARD_EXE_NAME
+    if not exe.exists():
+        raise FileNotFoundError(f"Dashboard executable not found: {exe}")
+    dst.mkdir(parents=True, exist_ok=True)
+    for item in src.iterdir():
+        if item.name.lower() in DASHBOARD_SHELL_EXCLUDED_NAMES:
+            continue
+        target = dst / item.name
+        if item.is_dir():
+            shutil.copytree(item, target, dirs_exist_ok=True)
+        else:
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(item, target)
+
+
 def remove_known_path(root: Path, target: Path) -> None:
     root = root.resolve()
     target = target.resolve()
@@ -162,19 +202,54 @@ class InstallerModel:
         payload = root / "payload"
         return payload if payload.exists() else root
 
+    def source_project_dir(self, prefix: str, fallback_name: str) -> Path:
+        exact = self.root / fallback_name
+        if exact.exists():
+            return exact
+        if self.root.exists():
+            matches = sorted(
+                path for path in self.root.iterdir()
+                if path.is_dir() and path.name.lower().startswith(prefix.lower())
+            )
+            if matches:
+                return matches[-1]
+        return exact
+
+    def source_dashboard_dir(self) -> Path:
+        return self.source_project_dir("TFM2_Meta_Dashboard", SOURCE_DASHBOARD_DIR_NAME)
+
+    def source_mod_dir(self) -> Path:
+        return self.source_project_dir(MOD_ID, MOD_PACKAGE_DIR_NAME)
+
     def dashboard_payload(self, source_root: Path | None = None) -> Path:
         payload = self.payload_root(source_root)
         candidate = payload / "dashboard_app"
         if candidate.exists():
             return candidate
-        return self.root / SOURCE_DASHBOARD_DIR_NAME / "resources" / "app"
+        return self.source_dashboard_dir() / "resources" / "app"
+
+    def dashboard_shell_payload(self, source_root: Path | None = None) -> Path:
+        payload = self.payload_root(source_root)
+        candidate = payload / "dashboard_shell"
+        if candidate.exists():
+            return candidate
+        return self.source_dashboard_dir()
+
+    def dashboard_shell_item_names(self, source_root: Path | None = None) -> list[str]:
+        shell = self.dashboard_shell_payload(source_root)
+        if shell.exists():
+            return [
+                item.name for item in shell.iterdir()
+                if item.name.lower() not in DASHBOARD_SHELL_EXCLUDED_NAMES
+            ]
+        return list(DASHBOARD_SHELL_DEFAULT_ITEMS)
 
     def addon_payload(self, source_root: Path | None = None) -> Path:
         payload = self.payload_root(source_root)
         candidate = payload / "mods" / MOD_ID
         if candidate.exists():
             return candidate
-        return self.root / MOD_PACKAGE_DIR_NAME
+        return self.source_mod_dir()
 
     def package_readme(self, source_root: Path | None = None) -> Path:
         payload = self.payload_root(source_root)
@@ -292,8 +367,17 @@ class InstallerModel:
     def install_dashboard(self, game_dir: Path, source_root: Path | None = None) -> None:
         resources_app = game_dir / "resources" / "app"
         resources_app.mkdir(parents=True, exist_ok=True)
-        self.backup_existing(game_dir, [resources_app / "tfm2_meta_dashboard", resources_app / "mods" / MOD_ID])
+        self.backup_existing(game_dir, [resources_app / "tfm2_meta_dashboard", resources_app / "mods" / MOD_ID, resources_app / "package_manifest.json"])
         copy_tree_contents(self.dashboard_payload(source_root), resources_app)
+
+    def install_dashboard_shell(self, game_dir: Path, source_root: Path | None = None) -> None:
+        shell = self.dashboard_shell_payload(source_root)
+        targets = [game_dir / name for name in self.dashboard_shell_item_names(source_root)]
+        self.backup_existing(game_dir, [target for target in targets if target.exists()])
+        for target in targets:
+            if target.exists():
+                remove_known_path(game_dir, target)
+        copy_dashboard_shell_contents(shell, game_dir)
 
     def install_addon(self, game_dir: Path, source_root: Path | None = None) -> None:
         mods_dir = game_dir / "mods"
@@ -304,6 +388,7 @@ class InstallerModel:
 
     def install_all(self, game_dir: Path, source_root: Path | None = None) -> None:
         self.save_config(game_dir)
+        self.install_dashboard_shell(game_dir, source_root)
         self.install_dashboard(game_dir, source_root)
         self.install_addon(game_dir, source_root)
 
@@ -312,8 +397,10 @@ class InstallerModel:
         targets = [
             resources_app / "tfm2_meta_dashboard",
             resources_app / "mods" / MOD_ID,
+            resources_app / "package_manifest.json",
             game_dir / "mods" / MOD_ID,
         ]
+        targets.extend(game_dir / name for name in self.dashboard_shell_item_names())
         self.backup_existing(game_dir, [target for target in targets if target.exists()])
         for target in targets:
             if target.exists():
@@ -339,17 +426,49 @@ class InstallerModel:
         addon = game_dir / "mods" / MOD_ID
         mod_info = read_json(addon / "mod.mod_info", {})
         dashboard = game_dir / "resources" / "app" / "tfm2_meta_dashboard"
+        dashboard_shell = game_dir / DASHBOARD_EXE_NAME
         core_json = addon / "core-item-builds.json"
         core_data = read_json(core_json, {})
+        installed_manifest = self.installed_manifest(game_dir)
+        installed_version = self.package_version(installed_manifest)
+        package_version = installed_version or ("설치 버전 기록 없음" if dashboard.exists() or dashboard_shell.exists() or addon.exists() else self.package_version(self.manifest) or "local-dev")
         return {
             "dashboardInstalled": dashboard.exists(),
+            "dashboardShellInstalled": dashboard_shell.exists(),
             "addonInstalled": addon.exists(),
             "addonVersion": mod_info.get("version") or "-",
             "coreGeneratedAt": core_data.get("generatedAt") or "-",
-            "packageVersion": self.manifest.get("packageVersion") or "local-dev",
+            "packageVersion": package_version,
             "dashboardSize": dir_size(dashboard),
+            "dashboardShellSize": dashboard_shell.stat().st_size if dashboard_shell.exists() else 0,
             "addonSize": dir_size(addon),
         }
+
+    def package_version(self, manifest: dict | None) -> str:
+        if not isinstance(manifest, dict):
+            return ""
+        return str(manifest.get("packageVersion") or "").strip()
+
+    def installed_manifest(self, game_dir: Path) -> dict:
+        for candidate in [
+            game_dir / "resources" / "app" / "package_manifest.json",
+            game_dir / "resources" / "app" / "tfm2_meta_dashboard" / "package_manifest.json",
+        ]:
+            data = read_json(candidate)
+            if isinstance(data, dict):
+                return data
+        return {}
+
+    def remote_manifest(self, package: Path) -> dict:
+        for candidate in [
+            package / "package_manifest.json",
+            package / "payload" / "package_manifest.json",
+            package / "payload" / "dashboard_app" / "package_manifest.json",
+        ]:
+            data = read_json(candidate)
+            if isinstance(data, dict):
+                return data
+        return {}
 
     def github_token(self) -> str | None:
         token = os.environ.get("TFM2GG_GITHUB_TOKEN") or os.environ.get("GITHUB_TOKEN")
@@ -476,17 +595,17 @@ class Tfm2InstallerApp(tk.Tk):
             lightcolor="#dbe2ea",
             darkcolor="#dbe2ea",
         )
-        self.style.configure("TLabel", background=bg, foreground="#1f2937", font=("Segoe UI", 10))
-        self.style.configure("Card.TLabel", background=card, foreground="#1f2937", font=("Segoe UI", 10))
-        self.style.configure("Title.TLabel", background=bg, foreground=ink, font=("Segoe UI Semibold", 22))
-        self.style.configure("Subtle.TLabel", background=bg, foreground=muted, font=("Segoe UI", 10))
-        self.style.configure("CardTitle.TLabel", background=card, foreground=ink, font=("Segoe UI Semibold", 12))
-        self.style.configure("StatusGood.TLabel", background="#dcfce7", foreground="#166534", font=("Segoe UI Semibold", 11))
-        self.style.configure("StatusWarn.TLabel", background="#fff7ed", foreground="#9a3412", font=("Segoe UI Semibold", 11))
-        self.style.configure("StatusBad.TLabel", background="#fee2e2", foreground="#991b1b", font=("Segoe UI Semibold", 11))
+        self.style.configure("TLabel", background=bg, foreground="#1f2937", font=("Malgun Gothic", 10))
+        self.style.configure("Card.TLabel", background=card, foreground="#1f2937", font=("Malgun Gothic", 10))
+        self.style.configure("Title.TLabel", background=bg, foreground=ink, font=("Malgun Gothic", 21))
+        self.style.configure("Subtle.TLabel", background=bg, foreground=muted, font=("Malgun Gothic", 10))
+        self.style.configure("CardTitle.TLabel", background=card, foreground=ink, font=("Malgun Gothic", 11))
+        self.style.configure("StatusGood.TLabel", background="#dcfce7", foreground="#166534", font=("Malgun Gothic", 10))
+        self.style.configure("StatusWarn.TLabel", background="#fff7ed", foreground="#9a3412", font=("Malgun Gothic", 10))
+        self.style.configure("StatusBad.TLabel", background="#fee2e2", foreground="#991b1b", font=("Malgun Gothic", 10))
         self.style.configure(
             "TButton",
-            font=("Segoe UI", 10),
+            font=("Malgun Gothic", 10),
             padding=(10, 8),
             background="#e5e7eb",
             foreground="#111827",
@@ -496,7 +615,7 @@ class Tfm2InstallerApp(tk.Tk):
         self.style.map("TButton", background=[("active", "#d1d5db"), ("pressed", "#cbd5e1")])
         self.style.configure(
             "Primary.TButton",
-            font=("Segoe UI Semibold", 10),
+            font=("Malgun Gothic", 10),
             padding=(12, 8),
             background="#2563eb",
             foreground="#ffffff",
@@ -506,7 +625,7 @@ class Tfm2InstallerApp(tk.Tk):
         self.style.map("Primary.TButton", background=[("active", "#1d4ed8"), ("pressed", "#1e40af")])
         self.style.configure(
             "Accent.TButton",
-            font=("Segoe UI Semibold", 10),
+            font=("Malgun Gothic", 10),
             padding=(10, 8),
             background="#059669",
             foreground="#ffffff",
@@ -516,7 +635,7 @@ class Tfm2InstallerApp(tk.Tk):
         self.style.map("Accent.TButton", background=[("active", "#047857"), ("pressed", "#065f46")])
         self.style.configure(
             "Danger.TButton",
-            font=("Segoe UI Semibold", 10),
+            font=("Malgun Gothic", 10),
             padding=(10, 8),
             background="#ef4444",
             foreground="#ffffff",
@@ -526,7 +645,7 @@ class Tfm2InstallerApp(tk.Tk):
         self.style.map("Danger.TButton", background=[("active", "#dc2626"), ("pressed", "#b91c1c")])
         self.style.configure(
             "Refresh.TButton",
-            font=("Segoe UI", 10),
+            font=("Malgun Gothic", 10),
             padding=(10, 8),
             background="#dbeafe",
             foreground="#1e3a8a",
@@ -646,6 +765,7 @@ class Tfm2InstallerApp(tk.Tk):
 
         installed = self.model.installed_status(game_dir)
         install_lines = [
+            f"실행 파일: {'설치됨' if installed['dashboardShellInstalled'] else '없음'}",
             f"대시보드: {'설치됨' if installed['dashboardInstalled'] else '없음'}",
             f"애드온: {'설치됨' if installed['addonInstalled'] else '없음'}",
             f"애드온 버전: {installed['addonVersion']}",
@@ -670,17 +790,34 @@ class Tfm2InstallerApp(tk.Tk):
             game_dir = self.current_game_dir()
             if kind in {"install", "repair"}:
                 self.model.install_all(game_dir)
-                self.work_queue.put(("log", "대시보드와 애드온 설치/복구 완료"))
+                if kind == "install":
+                    self.work_queue.put(("log", "설치 완료: 실행 파일, 대시보드, 아이템 자동 설정 애드온이 적용되었습니다."))
+                    self.work_queue.put(("success", ("설치 완료", "TFM2.gg 설치가 완료되었습니다.\nTFM2MetaDashboard.exe가 게임 폴더에 설치되었습니다.")))
+                else:
+                    self.work_queue.put(("log", "복구 완료: 실행 파일, 대시보드, 애드온을 다시 적용했습니다."))
+                    self.work_queue.put(("success", ("복구 완료", "TFM2.gg 복구가 완료되었습니다.\nTFM2MetaDashboard.exe와 필요한 파일을 다시 적용했습니다.")))
             elif kind == "addon":
                 self.model.install_addon(game_dir)
-                self.work_queue.put(("log", "아이템 자동 설정 애드온 설치 완료"))
+                self.work_queue.put(("log", "애드온 설치 완료: 아이템 자동 설정 모드가 적용되었습니다."))
+                self.work_queue.put(("success", ("애드온 설치 완료", "아이템 자동 설정 애드온 설치가 완료되었습니다.")))
             elif kind == "remove":
                 self.model.remove_all(game_dir)
-                self.work_queue.put(("log", "TFM2.gg 설치 항목 제거 완료"))
+                self.work_queue.put(("log", "제거 완료: TFM2.gg 설치 항목을 제거했습니다."))
+                self.work_queue.put(("success", ("제거 완료", "TFM2.gg 설치 항목을 제거했습니다.\n기존 파일은 백업 후 처리되었습니다.")))
             elif kind == "update":
                 package, release = self.model.download_latest_distribution()
-                self.work_queue.put(("log", f"원격 패키지 다운로드 완료: {package}"))
-                self.work_queue.put(("remote_apply", (package, release)))
+                remote_manifest = self.model.remote_manifest(package)
+                remote_version = self.model.package_version(remote_manifest)
+                current_manifest = self.model.installed_manifest(game_dir)
+                current_version = self.model.package_version(current_manifest)
+                self.work_queue.put(("log", f"원격 패키지 확인 완료: {package}"))
+                status = self.model.installed_status(game_dir)
+                install_complete = status["dashboardShellInstalled"] and status["dashboardInstalled"] and status["addonInstalled"]
+                if current_version and remote_version and current_version == remote_version and install_complete:
+                    self.work_queue.put(("log", f"이미 최신 버전입니다: {current_version}"))
+                    self.work_queue.put(("info", ("업데이트 확인", f"이미 최신 버전입니다.\n현재 버전: {current_version}")))
+                else:
+                    self.work_queue.put(("remote_apply", (package, release, current_version, remote_version)))
             self.work_queue.put(("refresh", None))
             self.work_queue.put(("done", kind))
         except PermissionError as exc:
@@ -699,15 +836,33 @@ class Tfm2InstallerApp(tk.Tk):
                 elif kind == "error":
                     self.log(f"오류: {payload}")
                     messagebox.showerror("TFM2.gg", str(payload))
+                elif kind == "info":
+                    title, message = payload
+                    messagebox.showinfo(str(title), str(message))
+                elif kind == "success":
+                    title, message = payload
+                    messagebox.showinfo(str(title), str(message))
                 elif kind == "refresh":
                     self.refresh_status()
                 elif kind == "remote_apply":
-                    package, release = payload
+                    package, release, current_version, remote_version = payload
                     tag = release.get("tag_name") or "latest"
-                    if messagebox.askyesno("원격 업데이트", f"{tag} 패키지를 받았습니다.\n이 패키지로 설치/복구를 바로 적용할까요?"):
+                    detail = (
+                        f"현재 버전: {current_version or '알 수 없음'}\n"
+                        f"새 버전: {remote_version or tag}\n\n"
+                        "새 버전으로 업데이트하시겠습니까?"
+                    )
+                    if messagebox.askyesno("원격 업데이트", detail):
                         threading.Thread(target=self.apply_remote_package, args=(package,), daemon=True).start()
                 elif kind == "done":
-                    self.status_var.set(f"{payload} 완료")
+                    done_labels = {
+                        "install": "설치 완료",
+                        "repair": "복구 완료",
+                        "addon": "애드온 설치 완료",
+                        "remove": "제거 완료",
+                        "update": "업데이트 확인 완료",
+                    }
+                    self.status_var.set(done_labels.get(str(payload), f"{payload} 완료"))
         except queue.Empty:
             pass
         self.after(120, self.drain_queue)
@@ -716,7 +871,8 @@ class Tfm2InstallerApp(tk.Tk):
         try:
             self.work_queue.put(("log", "원격 패키지 설치/복구 적용 시작"))
             self.model.install_all(self.current_game_dir(), source_root=package)
-            self.work_queue.put(("log", "원격 패키지 설치/복구 적용 완료"))
+            self.work_queue.put(("log", "업데이트 완료: 새 원격 패키지가 적용되었습니다."))
+            self.work_queue.put(("success", ("업데이트 완료", "TFM2.gg 업데이트가 완료되었습니다.\nTFM2MetaDashboard.exe와 새 패키지가 게임 폴더에 적용되었습니다.")))
             self.work_queue.put(("refresh", None))
         except Exception as exc:
             self.work_queue.put(("error", str(exc)))
@@ -739,7 +895,7 @@ class Tfm2InstallerApp(tk.Tk):
         frame.rowconfigure(1, weight=1)
         frame.columnconfigure(0, weight=1)
         ttk.Label(frame, text="README", style="Title.TLabel").grid(row=0, column=0, sticky="w", pady=(0, 12))
-        text = tk.Text(frame, bg="#ffffff", fg="#1f2937", relief="flat", padx=14, pady=12, wrap="word", font=("Segoe UI", 10))
+        text = tk.Text(frame, bg="#ffffff", fg="#1f2937", relief="flat", padx=14, pady=12, wrap="word", font=("Malgun Gothic", 10))
         text.grid(row=1, column=0, sticky="nsew")
         text.insert("1.0", readme.read_text(encoding="utf-8", errors="replace"))
         text.configure(state="disabled")

@@ -74,6 +74,64 @@ function Ensure-DashboardPythonRuntime {
     Assert-PathExists -Path $runtimePython -Label "Bundled Python runtime"
 }
 
+function Copy-DashboardShell {
+    param(
+        [string]$DashboardProject,
+        [string]$Destination,
+        [string]$CacheDirectory
+    )
+
+    if (Test-Path -LiteralPath $Destination) {
+        Remove-Item -LiteralPath $Destination -Recurse -Force
+    }
+    New-Item -ItemType Directory -Path $Destination -Force | Out-Null
+
+    $localDashboardExe = Join-Path $DashboardProject "TFM2MetaDashboard.exe"
+    if (Test-Path -LiteralPath $localDashboardExe -PathType Leaf) {
+        Write-Host "Using local dashboard shell: $DashboardProject"
+        Get-ChildItem -LiteralPath $DashboardProject -Force |
+            Where-Object { $_.Name -ne "resources" } |
+            ForEach-Object {
+                Copy-Item -LiteralPath $_.FullName -Destination (Join-Path $Destination $_.Name) -Recurse -Force
+            }
+    } else {
+        $electronVersionPath = Join-Path $DashboardProject "version"
+        $electronVersion = "39.8.10"
+        if (Test-Path -LiteralPath $electronVersionPath -PathType Leaf) {
+            $candidateVersion = (Get-Content -LiteralPath $electronVersionPath -Raw).Trim()
+            if ($candidateVersion) {
+                $electronVersion = $candidateVersion
+            }
+        }
+
+        $electronZip = Join-Path $CacheDirectory "electron-v$electronVersion-win32-x64.zip"
+        $electronUrl = "https://github.com/electron/electron/releases/download/v$electronVersion/electron-v$electronVersion-win32-x64.zip"
+        if (-not (Test-Path -LiteralPath $electronZip -PathType Leaf)) {
+            Write-Host "Downloading dashboard Electron shell: $electronUrl"
+            Invoke-WebRequest -Uri $electronUrl -OutFile $electronZip
+        }
+
+        $extractRoot = Join-Path $CacheDirectory "electron-shell-v$electronVersion"
+        if (Test-Path -LiteralPath $extractRoot) {
+            Remove-Item -LiteralPath $extractRoot -Recurse -Force
+        }
+        New-Item -ItemType Directory -Path $extractRoot -Force | Out-Null
+        Expand-Archive -LiteralPath $electronZip -DestinationPath $extractRoot -Force
+
+        Get-ChildItem -LiteralPath $extractRoot -Force |
+            Where-Object { $_.Name -ne "resources" } |
+            ForEach-Object {
+                Copy-Item -LiteralPath $_.FullName -Destination (Join-Path $Destination $_.Name) -Recurse -Force
+            }
+
+        $electronExe = Join-Path $Destination "electron.exe"
+        Assert-PathExists -Path $electronExe -Label "Electron shell executable"
+        Rename-Item -LiteralPath $electronExe -NewName "TFM2MetaDashboard.exe" -Force
+    }
+
+    Assert-PathExists -Path (Join-Path $Destination "TFM2MetaDashboard.exe") -Label "Dashboard shell executable"
+}
+
 $repoRoot = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot "..")).Path
 $outRoot = Join-Path $repoRoot $OutputRoot
 $packageRoot = Join-Path $outRoot "TFM2.gg_Distribution"
@@ -131,6 +189,8 @@ Copy-Item -LiteralPath $readmeSrc -Destination (Join-Path $payloadRoot "README.m
 $dashboardDest = Join-Path $payloadRoot "dashboard_app"
 Copy-CleanDirectory -Source $dashboardSrc -Destination $dashboardDest
 Ensure-DashboardPythonRuntime -DashboardDestination $dashboardDest -CacheDirectory $outRoot
+$dashboardShellDest = Join-Path $payloadRoot "dashboard_shell"
+Copy-DashboardShell -DashboardProject $dashboardProject -Destination $dashboardShellDest -CacheDirectory $outRoot
 New-Item -ItemType Directory -Path (Join-Path $payloadRoot "mods") -Force | Out-Null
 Copy-CleanDirectory -Source $modSrc -Destination (Join-Path $payloadRoot "mods\tfm2_meta_item_delegate")
 
@@ -143,10 +203,16 @@ Get-ChildItem -LiteralPath $packageRoot -Recurse -File -Force |
     Remove-Item -Force
 
 $dashboardFileCount = (Get-ChildItem -LiteralPath (Join-Path $payloadRoot "dashboard_app") -Recurse -File | Measure-Object).Count
+$dashboardShellFileCount = (Get-ChildItem -LiteralPath (Join-Path $payloadRoot "dashboard_shell") -Recurse -File | Measure-Object).Count
+$dashboardShellExe = Join-Path $payloadRoot "dashboard_shell\TFM2MetaDashboard.exe"
 $modDll = Join-Path $payloadRoot "mods\tfm2_meta_item_delegate\tfm2_meta_item_delegate.dll"
 if ($dashboardFileCount -lt 10) {
     throw "Dashboard payload looks incomplete. File count: $dashboardFileCount"
 }
+if ($dashboardShellFileCount -lt 10) {
+    throw "Dashboard shell payload looks incomplete. File count: $dashboardShellFileCount"
+}
+Assert-PathExists -Path $dashboardShellExe -Label "Dashboard shell executable"
 Assert-PathExists -Path $modDll -Label "Addon DLL"
 
 $sha = ""
@@ -172,6 +238,7 @@ $manifestJson = $manifest | ConvertTo-Json -Depth 8
 $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
 [System.IO.File]::WriteAllText((Join-Path $packageRoot "package_manifest.json"), $manifestJson, $utf8NoBom)
 [System.IO.File]::WriteAllText((Join-Path $payloadRoot "package_manifest.json"), $manifestJson, $utf8NoBom)
+[System.IO.File]::WriteAllText((Join-Path $dashboardDest "package_manifest.json"), $manifestJson, $utf8NoBom)
 
 $zipPath = Join-Path $outRoot "TFM2.gg_Distribution.zip"
 if (Test-Path -LiteralPath $zipPath) {
@@ -183,4 +250,5 @@ $zipInfo = Get-Item -LiteralPath $zipPath
 Write-Host "Distribution package: $packageRoot"
 Write-Host "Distribution zip: $zipPath"
 Write-Host "Dashboard files: $dashboardFileCount"
+Write-Host "Dashboard shell files: $dashboardShellFileCount"
 Write-Host "Package size: $($zipInfo.Length) bytes"

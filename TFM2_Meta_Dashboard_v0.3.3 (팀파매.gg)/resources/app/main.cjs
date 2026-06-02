@@ -1,6 +1,8 @@
-const { app, BrowserWindow, Menu, dialog } = require("electron");
+const { app, BrowserWindow, Menu, dialog, shell } = require("electron");
 const { spawn } = require("node:child_process");
 const fs = require("node:fs");
+const http = require("node:http");
+const https = require("node:https");
 const path = require("node:path");
 
 app.disableHardwareAcceleration();
@@ -8,6 +10,10 @@ app.disableHardwareAcceleration();
 const POLL_MS = 3000;
 const STABLE_MS = 1000;
 const MAX_STABLE_CHECKS = 30;
+const REPO_FULL_NAME = "hexase1-ship-it/TFM2.gg";
+const RELEASE_API = `https://api.github.com/repos/${REPO_FULL_NAME}/releases/latest`;
+const LATEST_TAG_REF_API = `https://api.github.com/repos/${REPO_FULL_NAME}/git/ref/tags/latest`;
+const RELEASE_ASSET_NAME = "TFM2.gg_Distribution.zip";
 
 let mainWindow = null;
 let dashboardDir = null;
@@ -18,6 +24,7 @@ let refreshCount = 0;
 let lastRefreshAt = null;
 let refreshing = false;
 let watcherStarted = false;
+let updatePromptShown = false;
 
 function nowEpoch() {
   return Math.floor(Date.now() / 1000);
@@ -32,13 +39,17 @@ function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-function loadingHtml(message) {
-  const safe = String(message || "").replace(/[&<>"]/g, (ch) => ({
+function escapeHtml(value) {
+  return String(value || "").replace(/[&<>"]/g, (ch) => ({
     "&": "&amp;",
     "<": "&lt;",
     ">": "&gt;",
     "\"": "&quot;"
   }[ch]));
+}
+
+function loadingHtml(message) {
+  const safe = escapeHtml(message);
   return `<!doctype html>
 <html lang="ko">
 <head>
@@ -79,6 +90,330 @@ function loadingHtml(message) {
 function setLoading(message) {
   if (mainWindow && !mainWindow.isDestroyed()) {
     mainWindow.loadURL(`data:text/html;charset=utf-8,${encodeURIComponent(loadingHtml(message))}`);
+  }
+}
+
+function userAgentHeaders() {
+  return {
+    "User-Agent": "TFM2.gg-Dashboard",
+    "Accept": "application/vnd.github+json"
+  };
+}
+
+function requestBuffer(url, headers = {}, redirectCount = 0) {
+  return new Promise((resolve, reject) => {
+    if (redirectCount > 5) {
+      reject(new Error("리다이렉트가 너무 많습니다."));
+      return;
+    }
+    const parsed = new URL(url);
+    const client = parsed.protocol === "http:" ? http : https;
+    const req = client.request(parsed, { headers: { ...userAgentHeaders(), ...headers } }, (res) => {
+      const status = res.statusCode || 0;
+      const location = res.headers.location;
+      if (status >= 300 && status < 400 && location) {
+        res.resume();
+        requestBuffer(new URL(location, parsed).toString(), headers, redirectCount + 1).then(resolve, reject);
+        return;
+      }
+      if (status < 200 || status >= 300) {
+        res.resume();
+        reject(new Error(`HTTP ${status}: ${url}`));
+        return;
+      }
+      const chunks = [];
+      res.on("data", (chunk) => chunks.push(chunk));
+      res.on("end", () => resolve(Buffer.concat(chunks)));
+    });
+    req.on("error", reject);
+    req.setTimeout(20000, () => req.destroy(new Error("요청 시간이 초과되었습니다.")));
+    req.end();
+  });
+}
+
+async function requestJson(url) {
+  const buffer = await requestBuffer(url);
+  return JSON.parse(buffer.toString("utf8"));
+}
+
+function downloadFile(url, destination) {
+  return new Promise((resolve, reject) => {
+    fs.mkdirSync(path.dirname(destination), { recursive: true });
+    const parsed = new URL(url);
+    const client = parsed.protocol === "http:" ? http : https;
+    const req = client.request(parsed, { headers: userAgentHeaders() }, (res) => {
+      const status = res.statusCode || 0;
+      const location = res.headers.location;
+      if (status >= 300 && status < 400 && location) {
+        res.resume();
+        downloadFile(new URL(location, parsed).toString(), destination).then(resolve, reject);
+        return;
+      }
+      if (status < 200 || status >= 300) {
+        res.resume();
+        reject(new Error(`HTTP ${status}: ${url}`));
+        return;
+      }
+      const stream = fs.createWriteStream(destination);
+      res.pipe(stream);
+      stream.on("finish", () => stream.close(resolve));
+      stream.on("error", reject);
+    });
+    req.on("error", reject);
+    req.setTimeout(90000, () => req.destroy(new Error("다운로드 시간이 초과되었습니다.")));
+    req.end();
+  });
+}
+
+function runPowershell(args, cwd) {
+  return new Promise((resolve, reject) => {
+    const child = spawn("powershell.exe", args, { cwd, windowsHide: true });
+    let output = "";
+    child.stdout.on("data", (data) => {
+      output += data.toString();
+    });
+    child.stderr.on("data", (data) => {
+      output += data.toString();
+    });
+    child.on("error", reject);
+    child.on("close", (code) => {
+      if (code === 0) {
+        resolve(output);
+      } else {
+        reject(new Error(`PowerShell exit ${code}\n${output}`));
+      }
+    });
+  });
+}
+
+function psQuote(value) {
+  return `'${String(value).replace(/'/g, "''")}'`;
+}
+
+function readJsonFile(file) {
+  try {
+    return JSON.parse(fs.readFileSync(file, "utf8").replace(/^\uFEFF/, ""));
+  } catch {
+    return null;
+  }
+}
+
+function resolvePackageManifest() {
+  const appPath = app.getAppPath();
+  const candidates = [
+    path.join(appPath, "package_manifest.json"),
+    dashboardDir ? path.resolve(dashboardDir, "..", "package_manifest.json") : null,
+    dashboardDir ? path.join(dashboardDir, "package_manifest.json") : null,
+    path.join(path.dirname(process.execPath), "resources", "app", "package_manifest.json")
+  ].filter(Boolean);
+  for (const candidate of candidates) {
+    if (fs.existsSync(candidate)) {
+      return readJsonFile(candidate);
+    }
+  }
+  return null;
+}
+
+function extractVersionSha(version) {
+  const match = String(version || "").match(/\+([0-9a-f]{7,40})$/i);
+  return match ? match[1].toLowerCase() : "";
+}
+
+async function resolveLatestTagSha(ref) {
+  const object = ref && ref.object;
+  if (!object || !object.sha) {
+    return "";
+  }
+  if (object.type !== "tag") {
+    return String(object.sha).toLowerCase();
+  }
+  const tag = await requestJson(object.url);
+  return String(tag?.object?.sha || object.sha).toLowerCase();
+}
+
+function releaseAsset(release) {
+  const assets = release?.assets || [];
+  return assets.find((asset) => asset.name === RELEASE_ASSET_NAME) ||
+    assets.find((asset) => String(asset.name || "").toLowerCase().endsWith(".zip")) ||
+    null;
+}
+
+async function getUpdateInfo() {
+  const localManifest = resolvePackageManifest();
+  const [release, tagRef] = await Promise.all([
+    requestJson(RELEASE_API),
+    requestJson(LATEST_TAG_REF_API).catch(() => null)
+  ]);
+  const latestSha = await resolveLatestTagSha(tagRef);
+  const currentVersion = localManifest?.packageVersion || "";
+  const currentSha = extractVersionSha(currentVersion);
+  const updateAvailable = !!latestSha && (!currentSha || !latestSha.startsWith(currentSha));
+  return {
+    localManifest,
+    release,
+    latestSha,
+    currentVersion,
+    currentSha,
+    updateAvailable,
+    asset: releaseAsset(release)
+  };
+}
+
+function updateLogHtml(info) {
+  const current = info.currentVersion || "알 수 없음";
+  const latest = info.latestSha ? info.latestSha.slice(0, 12) : "확인 실패";
+  const status = info.updateAvailable ? "새 버전 있음" : "최신 상태";
+  const release = info.release || {};
+  const notes = release.body ? escapeHtml(release.body).replace(/\n/g, "<br>") : "릴리스 노트가 없습니다.";
+  const asset = info.asset?.name || RELEASE_ASSET_NAME;
+  return `<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <title>TFM2.gg 업데이트 로그</title>
+  <style>
+    body { margin: 0; background: #f5f7fb; color: #111827; font-family: "Malgun Gothic", "Segoe UI", sans-serif; }
+    main { max-width: 820px; margin: 0 auto; padding: 24px; }
+    section { background: #fff; border: 1px solid #dbe2ea; padding: 18px; margin-bottom: 14px; }
+    h1 { margin: 0 0 10px; font-size: 22px; font-weight: 400; }
+    h2 { margin: 0 0 8px; font-size: 15px; font-weight: 400; color: #1d4ed8; }
+    p { margin: 6px 0; line-height: 1.7; }
+    code { background: #eef2f7; padding: 2px 6px; }
+  </style>
+</head>
+<body>
+  <main>
+    <section>
+      <h1>TFM2.gg 업데이트 로그</h1>
+      <p>상태: <code>${escapeHtml(status)}</code></p>
+      <p>현재 패키지: <code>${escapeHtml(current)}</code></p>
+      <p>최신 커밋: <code>${escapeHtml(latest)}</code></p>
+      <p>배포 파일: <code>${escapeHtml(asset)}</code></p>
+    </section>
+    <section>
+      <h2>릴리스 정보</h2>
+      <p>태그: <code>${escapeHtml(release.tag_name || "latest")}</code></p>
+      <p>게시: <code>${escapeHtml(release.published_at || "-")}</code></p>
+      <p><a href="${escapeHtml(release.html_url || `https://github.com/${REPO_FULL_NAME}/releases/tag/latest`)}" target="_blank">GitHub 릴리스 열기</a></p>
+    </section>
+    <section>
+      <h2>노트</h2>
+      <p>${notes}</p>
+    </section>
+  </main>
+</body>
+</html>`;
+}
+
+async function showUpdateLogWindow() {
+  const win = new BrowserWindow({
+    width: 860,
+    height: 680,
+    minWidth: 720,
+    minHeight: 520,
+    title: "TFM2.gg 업데이트 로그",
+    backgroundColor: "#f5f7fb",
+    webPreferences: {
+      contextIsolation: true,
+      nodeIntegration: false,
+      sandbox: true
+    }
+  });
+  win.webContents.setWindowOpenHandler(({ url }) => {
+    shell.openExternal(url);
+    return { action: "deny" };
+  });
+  win.loadURL(`data:text/html;charset=utf-8,${encodeURIComponent(loadingHtml("업데이트 로그를 불러오는 중입니다."))}`);
+  try {
+    const info = await getUpdateInfo();
+    await win.loadURL(`data:text/html;charset=utf-8,${encodeURIComponent(updateLogHtml(info))}`);
+  } catch (error) {
+    const message = error && error.message ? error.message : String(error);
+    await win.loadURL(`data:text/html;charset=utf-8,${encodeURIComponent(loadingHtml(`업데이트 로그를 불러오지 못했습니다.\n${message}`))}`);
+  }
+}
+
+function localUpdateDir() {
+  const root = process.env.LOCALAPPDATA || app.getPath("userData");
+  return path.join(root, "TFM2.gg", "updates", "latest");
+}
+
+function findDistributionRoot(root) {
+  if (fs.existsSync(path.join(root, "payload"))) {
+    return root;
+  }
+  for (const name of fs.readdirSync(root)) {
+    const candidate = path.join(root, name);
+    if (fs.statSync(candidate).isDirectory() && fs.existsSync(path.join(candidate, "payload"))) {
+      return candidate;
+    }
+  }
+  throw new Error("다운로드한 ZIP에서 배포 패키지를 찾지 못했습니다.");
+}
+
+async function downloadAndLaunchInstaller(info) {
+  if (!info.asset) {
+    throw new Error("최신 릴리스에 배포 ZIP이 없습니다.");
+  }
+  const updateDir = localUpdateDir();
+  const zipPath = path.join(updateDir, info.asset.name || RELEASE_ASSET_NAME);
+  const extractRoot = path.join(updateDir, "extracted");
+  fs.rmSync(extractRoot, { recursive: true, force: true });
+  fs.mkdirSync(extractRoot, { recursive: true });
+  const url = info.asset.browser_download_url || info.asset.url;
+  setLoading("새 버전을 다운로드하는 중입니다. 잠시만 기다려 주세요.");
+  await downloadFile(url, zipPath);
+  await runPowershell([
+    "-NoProfile",
+    "-ExecutionPolicy",
+    "Bypass",
+    "-Command",
+    `Expand-Archive -LiteralPath ${psQuote(zipPath)} -DestinationPath ${psQuote(extractRoot)} -Force`
+  ], updateDir);
+  const packageRoot = findDistributionRoot(extractRoot);
+  const installer = path.join(packageRoot, "TFM2GGInstaller.exe");
+  if (!fs.existsSync(installer)) {
+    throw new Error("배포 패키지에서 TFM2GGInstaller.exe를 찾지 못했습니다.");
+  }
+  dialog.showMessageBox(mainWindow, {
+    type: "info",
+    title: "TFM2.gg 업데이트",
+    message: "설치 도구를 실행합니다.",
+    detail: "업데이트를 적용할 수 있도록 현재 대시보드는 닫힙니다."
+  });
+  spawn(installer, [], {
+    cwd: packageRoot,
+    detached: true,
+    stdio: "ignore",
+    windowsHide: false
+  }).unref();
+  app.quit();
+}
+
+async function checkForUpdatesOnStartup() {
+  if (updatePromptShown) {
+    return;
+  }
+  try {
+    const info = await getUpdateInfo();
+    if (!info.updateAvailable) {
+      return;
+    }
+    updatePromptShown = true;
+    const response = await dialog.showMessageBox(mainWindow, {
+      type: "question",
+      title: "TFM2.gg 업데이트",
+      message: "TFM2.gg 새 버전이 있습니다.",
+      detail: `현재 버전: ${info.currentVersion || "알 수 없음"}\n최신 버전: ${info.latestSha ? info.latestSha.slice(0, 12) : "latest"}\n\n새 버전으로 업데이트하시겠습니까?`,
+      buttons: ["새 버전으로 업데이트", "나중에"],
+      defaultId: 0,
+      cancelId: 1
+    });
+    if (response.response === 0) {
+      await downloadAndLaunchInstaller(info);
+    }
+  } catch (error) {
+    console.warn("Update check failed:", error && error.message ? error.message : error);
   }
 }
 
@@ -170,6 +505,15 @@ function createAppMenu() {
             if (mainWindow && !mainWindow.isDestroyed()) {
               mainWindow.loadFile(path.join(dashboardDir, "README.md")).catch(() => {});
             }
+          }
+        },
+        {
+          label: "업데이트 로그",
+          click: () => {
+            showUpdateLogWindow().catch((error) => {
+              const message = error && error.message ? error.message : String(error);
+              dialog.showErrorBox("TFM2.gg 업데이트 로그", message);
+            });
           }
         }
       ]
@@ -425,6 +769,9 @@ async function main() {
   console.log(`Game root: ${gameRoot}`);
   writeAutoRefreshStatus("idle", "File > Save 선택... 에서 세이브를 선택하세요.");
   await mainWindow.loadFile(path.join(dashboardDir, "index.html"));
+  setTimeout(() => {
+    checkForUpdatesOnStartup();
+  }, 1200);
 }
 
 app.whenReady().then(() => {
