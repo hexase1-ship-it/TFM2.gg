@@ -788,6 +788,20 @@ def league_context_from_key(league_id, league_key=None):
     }
 
 
+def region_context_from_id(region_id):
+    if region_id is None:
+        return {"regionId": None, "regionKey": None, "regionLabel": "region unknown"}
+    if 0 <= region_id < len(LEAGUE_KEY_FALLBACKS):
+        region_key = LEAGUE_KEY_FALLBACKS[region_id]
+    else:
+        region_key = f"region{region_id}"
+    return {
+        "regionId": region_id,
+        "regionKey": region_key,
+        "regionLabel": LEAGUE_REGION_LABELS.get(region_key, region_key.upper()),
+    }
+
+
 def build_league_meta(team_meta):
     league_keys = defaultdict(Counter)
     for team in team_meta.values():
@@ -1908,18 +1922,35 @@ def finalize_aggregated_stats(stats, total_match, source, item_catalog=None):
 
 
 def parse_solo_rank_stats(path: Path, champion_ids, item_catalog=None):
+    empty_splits = {
+        "stats": {"region": {}},
+        "statsByPatch": {"region": {}},
+        "relationships": {"region": {}},
+        "relationshipsByPatch": {"region": {}},
+        "laneSynergies": {"region": {}},
+        "laneSynergiesByPatch": {"region": {}},
+        "counts": {"region": {}, "regionByPatch": {}},
+    }
     if not path.exists():
-        return {}, {"groups": 0, "pairs": {}, "counters": {}}, {}, {}, empty_lane_synergy_payload(), {}
+        return {}, {"groups": 0, "pairs": {}, "counters": {}}, {}, {}, empty_lane_synergy_payload(), {}, empty_splits
     text = path.read_text(encoding="utf-8", errors="ignore")
     champion_ids = set(champion_ids)
     stats = defaultdict(blank_stat)
     stats_by_version = defaultdict(lambda: defaultdict(blank_stat))
+    stats_by_region = defaultdict(lambda: defaultdict(blank_stat))
+    stats_by_version_region = defaultdict(lambda: defaultdict(lambda: defaultdict(blank_stat)))
     relations = RelationAccumulator()
     relations_by_version = defaultdict(RelationAccumulator)
+    relations_by_region = defaultdict(RelationAccumulator)
+    relations_by_version_region = defaultdict(lambda: defaultdict(RelationAccumulator))
     lane_synergies = LanePairAccumulator()
     lane_synergies_by_version = defaultdict(LanePairAccumulator)
+    lane_synergies_by_region = defaultdict(LanePairAccumulator)
+    lane_synergies_by_version_region = defaultdict(lambda: defaultdict(LanePairAccumulator))
     total_matches = 0
     total_matches_by_version = Counter()
+    total_matches_by_region = Counter()
+    total_matches_by_version_region = defaultdict(Counter)
 
     offset = 0
     while True:
@@ -1941,24 +1972,77 @@ def parse_solo_rank_stats(path: Path, champion_ids, item_catalog=None):
         if not blue_players or not red_players:
             continue
         version = parse_version(block)
+        region = region_context_from_id(parse_first_int(block, "region_id"))
+        region_key = region.get("regionKey")
         total_matches += 1
         total_matches_by_version[version] += 1
+        if region_key:
+            total_matches_by_region[region_key] += 1
+            total_matches_by_version_region[version][region_key] += 1
         for player in blue_players:
             add_player_stat(stats, player["champion"], blue_win, player, "solo_rank_export")
             add_player_stat(stats_by_version[version], player["champion"], blue_win, player, "solo_rank_export")
+            if region_key:
+                add_player_stat(stats_by_region[region_key], player["champion"], blue_win, player, "solo_rank_region_split")
+                add_player_stat(stats_by_version_region[version][region_key], player["champion"], blue_win, player, "solo_rank_region_split")
         for player in red_players:
             add_player_stat(stats, player["champion"], not blue_win, player, "solo_rank_export")
             add_player_stat(stats_by_version[version], player["champion"], not blue_win, player, "solo_rank_export")
+            if region_key:
+                add_player_stat(stats_by_region[region_key], player["champion"], not blue_win, player, "solo_rank_region_split")
+                add_player_stat(stats_by_version_region[version][region_key], player["champion"], not blue_win, player, "solo_rank_region_split")
         relations.record([p["champion"] for p in blue_players], [p["champion"] for p in red_players], blue_win)
         relations_by_version[version].record([p["champion"] for p in blue_players], [p["champion"] for p in red_players], blue_win)
         lane_synergies.record(blue_players, blue_win)
         lane_synergies.record(red_players, not blue_win)
         lane_synergies_by_version[version].record(blue_players, blue_win)
         lane_synergies_by_version[version].record(red_players, not blue_win)
+        if region_key:
+            relations_by_region[region_key].record([p["champion"] for p in blue_players], [p["champion"] for p in red_players], blue_win)
+            relations_by_version_region[version][region_key].record([p["champion"] for p in blue_players], [p["champion"] for p in red_players], blue_win)
+            lane_synergies_by_region[region_key].record(blue_players, blue_win)
+            lane_synergies_by_region[region_key].record(red_players, not blue_win)
+            lane_synergies_by_version_region[version][region_key].record(blue_players, blue_win)
+            lane_synergies_by_version_region[version][region_key].record(red_players, not blue_win)
 
     version_stats = {
         version: finalize_aggregated_stats(rows, total_matches_by_version[version], "solo_rank_export", item_catalog)
         for version, rows in stats_by_version.items()
+    }
+    split_stats = {
+        key: finalize_aggregated_stats(rows, total_matches_by_region[key], "solo_rank_region_split", item_catalog)
+        for key, rows in sorted(stats_by_region.items())
+    }
+    split_stats_by_patch = {}
+    for version, region_rows in sorted(stats_by_version_region.items(), key=lambda item: version_sort_key(item[0])):
+        split_stats_by_patch[version] = {
+            key: finalize_aggregated_stats(rows, total_matches_by_version_region[version][key], "solo_rank_region_split", item_catalog)
+            for key, rows in sorted(region_rows.items())
+        }
+    solo_splits = {
+        "stats": {"region": split_stats},
+        "statsByPatch": {"region": split_stats_by_patch},
+        "relationships": {"region": {key: rel.to_payload() for key, rel in sorted(relations_by_region.items())}},
+        "relationshipsByPatch": {
+            "region": {
+                version: {key: rel.to_payload() for key, rel in sorted(region_rows.items())}
+                for version, region_rows in sorted(relations_by_version_region.items(), key=lambda item: version_sort_key(item[0]))
+            }
+        },
+        "laneSynergies": {"region": {key: rel.to_payload() for key, rel in sorted(lane_synergies_by_region.items())}},
+        "laneSynergiesByPatch": {
+            "region": {
+                version: {key: rel.to_payload() for key, rel in sorted(region_rows.items())}
+                for version, region_rows in sorted(lane_synergies_by_version_region.items(), key=lambda item: version_sort_key(item[0]))
+            }
+        },
+        "counts": {
+            "region": dict(sorted(total_matches_by_region.items())),
+            "regionByPatch": {
+                version: dict(sorted(counter.items()))
+                for version, counter in sorted(total_matches_by_version_region.items(), key=lambda item: version_sort_key(item[0]))
+            },
+        },
     }
     return (
         finalize_aggregated_stats(stats, total_matches, "solo_rank_export", item_catalog),
@@ -1967,6 +2051,7 @@ def parse_solo_rank_stats(path: Path, champion_ids, item_catalog=None):
         {version: rel.to_payload() for version, rel in relations_by_version.items()},
         lane_synergies.to_payload(),
         {version: rel.to_payload() for version, rel in lane_synergies_by_version.items()},
+        solo_splits,
     )
 
 
@@ -2820,6 +2905,109 @@ def combine_scope_stats(champions, tournament, solo, draft_scan, item_catalog=No
     return combined
 
 
+def normalize_split_stats(champions, split_stats, draft_scan):
+    return {
+        axis: {
+            key: normalize_scope(champions, rows, draft_scan)
+            for key, rows in groups.items()
+        }
+        for axis, groups in split_stats.items()
+    }
+
+
+def normalize_split_stats_by_patch(champions, split_stats_by_patch, draft_scan):
+    return {
+        axis: {
+            version: {
+                key: normalize_scope(champions, rows, draft_scan)
+                for key, rows in groups.items()
+            }
+            for version, groups in versions.items()
+        }
+        for axis, versions in split_stats_by_patch.items()
+    }
+
+
+def split_count(split_payload, axis, key):
+    return (split_payload.get("counts", {}).get(axis, {}) or {}).get(key, 0)
+
+
+def split_count_by_patch(split_payload, axis, version, key):
+    return (split_payload.get("counts", {}).get(f"{axis}ByPatch", {}).get(version, {}) or {}).get(key, 0)
+
+
+def build_combined_region_split_payload(champions, tournament_splits, solo_splits, draft_scan, item_catalog=None):
+    axis = "region"
+    tournament_regions = tournament_splits.get("stats", {}).get(axis, {}) or {}
+    solo_regions = solo_splits.get("stats", {}).get(axis, {}) or {}
+    region_keys = sorted(set(tournament_regions) | set(solo_regions))
+    stats = {axis: {}}
+    relationships = {axis: {}}
+    lane_synergies = {axis: {}}
+    counts = {axis: {}}
+    for key in region_keys:
+        stats[axis][key] = combine_scope_stats(
+            champions,
+            tournament_regions.get(key, {}),
+            solo_regions.get(key, {}),
+            draft_scan,
+            item_catalog,
+        )
+        relationships[axis][key] = merge_relationship_payloads(
+            (tournament_splits.get("relationships", {}).get(axis, {}) or {}).get(key, {}),
+            (solo_splits.get("relationships", {}).get(axis, {}) or {}).get(key, {}),
+        )
+        lane_synergies[axis][key] = merge_lane_synergy_payloads(
+            (tournament_splits.get("laneSynergies", {}).get(axis, {}) or {}).get(key, {}),
+            (solo_splits.get("laneSynergies", {}).get(axis, {}) or {}).get(key, {}),
+        )
+        counts[axis][key] = split_count(tournament_splits, axis, key) + split_count(solo_splits, axis, key)
+
+    stats_by_patch = {axis: {}}
+    relationships_by_patch = {axis: {}}
+    lane_synergies_by_patch = {axis: {}}
+    counts[f"{axis}ByPatch"] = {}
+    tournament_by_patch = tournament_splits.get("statsByPatch", {}).get(axis, {}) or {}
+    solo_by_patch = solo_splits.get("statsByPatch", {}).get(axis, {}) or {}
+    versions = sorted(set(tournament_by_patch) | set(solo_by_patch), key=version_sort_key)
+    for version in versions:
+        version_regions = sorted(set(tournament_by_patch.get(version, {})) | set(solo_by_patch.get(version, {})))
+        stats_by_patch[axis][version] = {}
+        relationships_by_patch[axis][version] = {}
+        lane_synergies_by_patch[axis][version] = {}
+        counts[f"{axis}ByPatch"][version] = {}
+        for key in version_regions:
+            stats_by_patch[axis][version][key] = combine_scope_stats(
+                champions,
+                tournament_by_patch.get(version, {}).get(key, {}),
+                solo_by_patch.get(version, {}).get(key, {}),
+                draft_scan,
+                item_catalog,
+            )
+            relationships_by_patch[axis][version][key] = merge_relationship_payloads(
+                (tournament_splits.get("relationshipsByPatch", {}).get(axis, {}).get(version, {}) or {}).get(key, {}),
+                (solo_splits.get("relationshipsByPatch", {}).get(axis, {}).get(version, {}) or {}).get(key, {}),
+            )
+            lane_synergies_by_patch[axis][version][key] = merge_lane_synergy_payloads(
+                (tournament_splits.get("laneSynergiesByPatch", {}).get(axis, {}).get(version, {}) or {}).get(key, {}),
+                (solo_splits.get("laneSynergiesByPatch", {}).get(axis, {}).get(version, {}) or {}).get(key, {}),
+            )
+            counts[f"{axis}ByPatch"][version][key] = (
+                split_count_by_patch(tournament_splits, axis, version, key)
+                + split_count_by_patch(solo_splits, axis, version, key)
+            )
+
+    return {
+        "stats": stats,
+        "statsByPatch": stats_by_patch,
+        "relationships": relationships,
+        "relationshipsByPatch": relationships_by_patch,
+        "laneSynergies": lane_synergies,
+        "laneSynergiesByPatch": lane_synergies_by_patch,
+        "counts": counts,
+    }
+
+
 def merge_counter_dicts(*items):
     total = Counter()
     for item in items:
@@ -3005,7 +3193,10 @@ def main():
             solo_relationships_by_version,
             solo_lane_synergies,
             solo_lane_synergies_by_version,
+            solo_splits,
         ) = parse_solo_rank_stats(EXPORT_DIR / "solo_rank_matches.debug.txt", champion_ids, item_catalog)
+        solo_splits["stats"] = normalize_split_stats(champions, solo_splits.get("stats", {}), draft_scan)
+        solo_splits["statsByPatch"] = normalize_split_stats_by_patch(champions, solo_splits.get("statsByPatch", {}), draft_scan)
         solo_stats = normalize_scope(champions, solo_stats_raw, draft_scan)
         solo_replay_ids = parse_solo_rank_replay_ids(EXPORT_DIR / "solo_rank_matches.debug.txt")
         (
@@ -3035,6 +3226,15 @@ def main():
         solo_relationships_by_version = {}
         solo_lane_synergies = empty_lane_synergy_payload()
         solo_lane_synergies_by_version = {}
+        solo_splits = {
+            "stats": {"region": {}},
+            "statsByPatch": {"region": {}},
+            "relationships": {"region": {}},
+            "relationshipsByPatch": {"region": {}},
+            "laneSynergies": {"region": {}},
+            "laneSynergiesByPatch": {"region": {}},
+            "counts": {"region": {}, "regionByPatch": {}},
+        }
         solo_stats = normalize_scope(champions, solo_stats_raw, draft_scan)
         solo_replay_ids = set()
         tournament_relationships = empty_rel
@@ -3045,6 +3245,7 @@ def main():
         match_analysis = []
         tournament_splits = build_match_analysis_split_payload(champions, full_match_analysis, draft_scan, item_catalog)
     combined_stats = combine_scope_stats(champions, tournament_stats, solo_stats, draft_scan, item_catalog)
+    combined_splits = build_combined_region_split_payload(champions, tournament_splits, solo_splits, draft_scan, item_catalog)
 
     for scope_stats in [tournament_stats, solo_stats, combined_stats]:
         for champ in champions:
@@ -3129,6 +3330,12 @@ def main():
         region_key = row.get("regionKey")
         if region_key and region_key not in region_meta:
             region_meta[region_key] = {"regionKey": region_key, "label": row.get("regionLabel") or region_key}
+    for region_key in solo_splits.get("counts", {}).get("region", {}):
+        if region_key and region_key not in region_meta:
+            region_meta[region_key] = {
+                "regionKey": region_key,
+                "label": LEAGUE_REGION_LABELS.get(region_key, region_key),
+            }
     competition_meta = [
         {"key": "league_regular", "label": "리그전"},
         {"key": "league_playoff", "label": "플레이오프"},
@@ -3174,6 +3381,7 @@ def main():
             "coreItemBuildsMod": str(CORE_ITEM_BUILDS_MOD_OUT),
             "coreItemBuildsTournamentMatches": core_item_builds["sources"]["tournamentMatches"],
             "leagueSplitMatches": tournament_splits["counts"].get("league", {}),
+            "soloRegionMatches": solo_splits["counts"].get("region", {}),
         },
         "saveLookup": save_lookup,
         "replayDateInference": replay_date_status,
@@ -3197,6 +3405,8 @@ def main():
         },
         "statsByPatch": stats_by_patch,
         "tournamentSplits": tournament_splits,
+        "soloSplits": solo_splits,
+        "combinedSplits": combined_splits,
         "relationships": overall_relationships["pairs"],
         "relationshipsByScope": {
             "overall": overall_relationships,
