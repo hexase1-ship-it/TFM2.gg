@@ -48,6 +48,32 @@ function Copy-CleanDirectory {
     Copy-Item -LiteralPath $Source -Destination $Destination -Recurse -Force
 }
 
+function Get-DirectoryContentHash {
+    param(
+        [string]$Path
+    )
+
+    $basePath = (Resolve-Path -LiteralPath $Path).Path.TrimEnd("\") + "\"
+    $lines = New-Object System.Collections.Generic.List[string]
+    Get-ChildItem -LiteralPath $Path -Recurse -File -Force |
+        Where-Object { $_.Name -ne "package_manifest.json" } |
+        Sort-Object FullName |
+        ForEach-Object {
+            $relative = $_.FullName.Substring($basePath.Length).Replace("\", "/")
+            $hash = (Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
+            $lines.Add("$relative`t$($_.Length)`t$hash")
+        }
+
+    $joined = [string]::Join("`n", $lines)
+    $bytes = [System.Text.Encoding]::UTF8.GetBytes($joined)
+    $sha256 = [System.Security.Cryptography.SHA256]::Create()
+    try {
+        return ([System.BitConverter]::ToString($sha256.ComputeHash($bytes))).Replace("-", "").ToLowerInvariant()
+    } finally {
+        $sha256.Dispose()
+    }
+}
+
 function Ensure-DashboardPythonRuntime {
     param(
         [string]$DashboardDestination,
@@ -219,6 +245,7 @@ if ($dashboardShellFileCount -lt 10) {
 }
 Assert-PathExists -Path $dashboardShellExe -Label "Dashboard shell executable"
 Assert-PathExists -Path $modDll -Label "Addon DLL"
+$dashboardRevision = Get-DirectoryContentHash -Path $dashboardDest
 
 $sha = ""
 $fullSha = ""
@@ -239,6 +266,7 @@ $manifest = [ordered]@{
     name = "TFM2.gg"
     packageVersion = $version
     sourceRevision = $fullSha
+    dashboardRevision = $dashboardRevision
     packageLayoutVersion = 2
     dashboardInstallDir = "TFM2.gg"
     targetGameVersion = "0.4.8"
@@ -256,6 +284,21 @@ $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
 [System.IO.File]::WriteAllText((Join-Path $payloadRoot "package_manifest.json"), $manifestJson, $utf8NoBom)
 [System.IO.File]::WriteAllText((Join-Path $dashboardDest "package_manifest.json"), $manifestJson, $utf8NoBom)
 [System.IO.File]::WriteAllText((Join-Path $dashboardShellDest "package_manifest.json"), $manifestJson, $utf8NoBom)
+
+$updateInfo = [ordered]@{
+    name = "TFM2.gg"
+    packageVersion = $version
+    sourceRevision = $fullSha
+    dashboardRevision = $dashboardRevision
+    packageLayoutVersion = 2
+    targetGameVersion = "0.4.8"
+    repository = "hexase1-ship-it/TFM2.gg"
+    releaseAsset = "TFM2.gg_Distribution.zip"
+    generatedAt = $manifest.generatedAt
+}
+$updateInfoJson = $updateInfo | ConvertTo-Json -Depth 8
+[System.IO.File]::WriteAllText((Join-Path $outRoot "TFM2.gg_UpdateInfo.json"), $updateInfoJson, $utf8NoBom)
+[System.IO.File]::WriteAllText((Join-Path $packageRoot "TFM2.gg_UpdateInfo.json"), $updateInfoJson, $utf8NoBom)
 
 $zipPath = Join-Path $outRoot "TFM2.gg_Distribution.zip"
 if (Test-Path -LiteralPath $zipPath) {

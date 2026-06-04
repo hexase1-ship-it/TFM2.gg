@@ -45,4 +45,4 @@ jobs:
           } else {
             gh release edit $tag --title "TFM2.gg latest" --notes $notes --latest
           }
-          gh release upload $tag dist/TFM2.gg_Distribution.zip --clobber
+          gh release upload $tag dist/TFM2.gg_Distribution.zip dist/TFM2.gg_UpdateInfo.json --clobber

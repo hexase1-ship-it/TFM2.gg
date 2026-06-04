@@ -14,6 +14,7 @@ const REPO_FULL_NAME = "hexase1-ship-it/TFM2.gg";
 const RELEASE_API = `https://api.github.com/repos/${REPO_FULL_NAME}/releases/latest`;
 const LATEST_TAG_REF_API = `https://api.github.com/repos/${REPO_FULL_NAME}/git/ref/tags/latest`;
 const RELEASE_ASSET_NAME = "TFM2.gg_Distribution.zip";
+const UPDATE_INFO_ASSET_NAME = "TFM2.gg_UpdateInfo.json";
 const PACKAGE_LAYOUT_VERSION = 2;
 
 let mainWindow = null;
@@ -225,6 +226,10 @@ function manifestRevision(manifest) {
   return revision || extractVersionSha(manifest?.packageVersion);
 }
 
+function dashboardRevision(manifest) {
+  return String(manifest?.dashboardRevision || "").trim().toLowerCase();
+}
+
 function manifestLayoutVersion(manifest) {
   const value = Number.parseInt(manifest?.packageLayoutVersion || 0, 10);
   return Number.isFinite(value) ? value : 0;
@@ -249,27 +254,57 @@ function releaseAsset(release) {
     null;
 }
 
+function namedReleaseAsset(release, name) {
+  const assets = release?.assets || [];
+  return assets.find((asset) => asset.name === name) || null;
+}
+
+async function fetchRemoteUpdateInfo(release) {
+  const asset = namedReleaseAsset(release, UPDATE_INFO_ASSET_NAME);
+  const url = asset?.browser_download_url || asset?.url;
+  if (!url) {
+    return null;
+  }
+  try {
+    return await requestJson(url);
+  } catch {
+    return null;
+  }
+}
+
 async function getUpdateInfo() {
   const localManifest = resolvePackageManifest();
   const [release, tagRef] = await Promise.all([
     requestJson(RELEASE_API),
     requestJson(LATEST_TAG_REF_API).catch(() => null)
   ]);
+  const remoteInfo = await fetchRemoteUpdateInfo(release);
   const latestSha = await resolveLatestTagSha(tagRef);
   const currentVersion = localManifest?.packageVersion || "";
   const currentSha = manifestRevision(localManifest);
+  const currentDashboardRevision = dashboardRevision(localManifest);
+  const latestDashboardRevision = dashboardRevision(remoteInfo);
   const currentLayout = manifestLayoutVersion(localManifest);
-  const layoutUpdateNeeded = currentLayout < PACKAGE_LAYOUT_VERSION;
-  const revisionUpdateNeeded = !!latestSha && (!currentSha || !latestSha.startsWith(currentSha));
-  const updateAvailable = layoutUpdateNeeded || revisionUpdateNeeded;
+  const latestLayout = manifestLayoutVersion(remoteInfo) || PACKAGE_LAYOUT_VERSION;
+  const layoutUpdateNeeded = currentLayout < latestLayout;
+  const dashboardUpdateNeeded = !!latestDashboardRevision && (
+    !currentDashboardRevision || currentDashboardRevision !== latestDashboardRevision
+  );
+  const revisionUpdateNeeded = !remoteInfo && !!latestSha && (!currentSha || !latestSha.startsWith(currentSha));
+  const updateAvailable = layoutUpdateNeeded || dashboardUpdateNeeded || revisionUpdateNeeded;
   return {
     localManifest,
+    remoteInfo,
     release,
     latestSha,
     currentVersion,
     currentSha,
+    currentDashboardRevision,
+    latestDashboardRevision,
     currentLayout,
+    latestLayout,
     layoutUpdateNeeded,
+    dashboardUpdateNeeded,
     revisionUpdateNeeded,
     updateAvailable,
     asset: releaseAsset(release)
@@ -419,12 +454,17 @@ async function checkForUpdatesOnStartup() {
       return;
     }
     updatePromptShown = true;
-    const updateReason = info.layoutUpdateNeeded ? "설치 구조 업데이트 필요" : "새 패키지 버전 있음";
+    const updateReason = info.layoutUpdateNeeded
+      ? "설치 구조 업데이트 필요"
+      : info.dashboardUpdateNeeded
+        ? "대시보드 파일 업데이트 필요"
+        : "새 패키지 버전 있음";
+    const latestVersion = info.remoteInfo?.packageVersion || (info.latestSha ? info.latestSha.slice(0, 12) : "latest");
     const response = await dialog.showMessageBox(mainWindow, {
       type: "question",
       title: "TFM2.gg 업데이트",
       message: "TFM2.gg 새 버전이 있습니다.",
-      detail: `현재 버전: ${info.currentVersion || "알 수 없음"}\n설치 구조: ${info.currentLayout || "-"}\n최신 버전: ${info.latestSha ? info.latestSha.slice(0, 12) : "latest"}\n사유: ${updateReason}\n\n새 버전으로 업데이트하시겠습니까?`,
+      detail: `현재 버전: ${info.currentVersion || "알 수 없음"}\n설치 구조: ${info.currentLayout || "-"}\n최신 버전: ${latestVersion}\n사유: ${updateReason}\n\n새 버전으로 업데이트하시겠습니까?`,
       buttons: ["새 버전으로 업데이트", "나중에"],
       defaultId: 0,
       cancelId: 1

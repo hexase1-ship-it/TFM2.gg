@@ -594,6 +594,8 @@ class InstallerModel:
             self.dashboard_install_dir(game_dir) / DASHBOARD_EXE_NAME,
             dashboard_app / "main.cjs",
             dashboard_app / "tfm2_meta_dashboard",
+            dashboard_app / "tfm2_meta_dashboard" / "data" / "meta-data.js",
+            dashboard_app / "tfm2_meta_dashboard" / "data" / "core-item-builds.json",
             game_dir / "mods" / MOD_ID / "tfm2_meta_item_delegate.dll",
         ]
 
