@@ -1,0 +1,57 @@
+{
+  "modelVersion": "tfm2gg-meta-v1",
+  "posterior": {
+    "z": 0.84,
+    "fallbackPriorMean": 0.5,
+    "kappa": {
+      "early": [8, 50],
+      "normal": [12, 80],
+      "role": [18, 100]
+    },
+    "ratePriorKappa": 20
+  },
+  "strength": {
+    "meanWeight": 0.7,
+    "lowerWeight": 0.3
+  },
+  "pressure": {
+    "eps": 0.001,
+    "scale": 16
+  },
+  "presets": {
+    "classic": {
+      "label": "classic",
+      "metaStrengthWeight": 0.84,
+      "metaPressureWeight": 0.16,
+      "lowerStrengthWeight": 0.88,
+      "lowerPressureWeight": 0.12
+    },
+    "fearless": {
+      "label": "fearless",
+      "metaStrengthWeight": 0.78,
+      "metaPressureWeight": 0.22,
+      "lowerStrengthWeight": 0.82,
+      "lowerPressureWeight": 0.18
+    },
+    "hardFearless": {
+      "label": "hardFearless",
+      "metaStrengthWeight": 0.72,
+      "metaPressureWeight": 0.28,
+      "lowerStrengthWeight": 0.78,
+      "lowerPressureWeight": 0.22
+    }
+  },
+  "tiers": [
+    { "tier": "OP", "minLower": 56, "maxPercentile": 0.08 },
+    { "tier": "1", "minLower": 51, "maxPercentile": 0.22 },
+    { "tier": "2", "minLower": 48, "maxPercentile": 0.45 },
+    { "tier": "3", "minLower": 44, "maxPercentile": 0.7 }
+  ],
+  "honey": {
+    "strengthGateStart": 50,
+    "strengthGateSpan": 15,
+    "residualDivisor": 20,
+    "residualExponent": 0.75,
+    "strengthGateExponent": 0.75
+  }
+}

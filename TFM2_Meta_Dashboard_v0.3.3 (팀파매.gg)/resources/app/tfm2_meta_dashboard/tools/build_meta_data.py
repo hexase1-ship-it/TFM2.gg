@@ -13,6 +13,7 @@ from pathlib import Path
 ROOT = Path(os.environ.get("TFM2_GAME_ROOT", Path(__file__).resolve().parents[2])).resolve()
 DASHBOARD = Path(__file__).resolve().parents[1]
 OUT = DASHBOARD / "data" / "meta-data.js"
+SCORE_MODEL_SPEC = DASHBOARD / "data" / "score-model-spec.json"
 CORE_ITEM_BUILDS_OUT = DASHBOARD / "data" / "core-item-builds.json"
 CORE_ITEM_BUILDS_MOD_OUT = ROOT / "mods" / "tfm2_meta_item_delegate" / "core-item-builds.json"
 CORE_ITEM_BUILDS_MOD_DATA_OUT = ROOT / "mods" / "tfm2_meta_item_delegate" / "data" / "core-item-builds.json"
@@ -53,6 +54,61 @@ POLICY_PRESETS = {
     "hardFearless": {"label": "hardFearless", "weights": {"win": 1.0, "pick": 0.15, "ban": 0.85}},
 }
 POLICY_TIER_MAP = {"OP": "S", "1": "A", "2": "B", "3": "C", "4": "D", "-": "C"}
+INTERNAL_SCORE_FIELDS = [
+    "pickOpportunities",
+    "banOpportunities",
+    "sourceMatchCounts",
+    "sourcePickCounts",
+    "sourceBanCounts",
+]
+
+DEFAULT_SCORE_MODEL_SPEC = {
+    "modelVersion": "tfm2gg-meta-v1",
+    "posterior": {
+        "z": 0.84,
+        "fallbackPriorMean": 0.5,
+        "kappa": {"early": [8, 50], "normal": [12, 80], "role": [18, 100]},
+        "ratePriorKappa": 20,
+    },
+    "strength": {"meanWeight": 0.7, "lowerWeight": 0.3},
+    "pressure": {"eps": 0.001, "scale": 16},
+    "presets": {
+        "classic": {
+            "label": "classic",
+            "metaStrengthWeight": 0.84,
+            "metaPressureWeight": 0.16,
+            "lowerStrengthWeight": 0.88,
+            "lowerPressureWeight": 0.12,
+        },
+        "fearless": {
+            "label": "fearless",
+            "metaStrengthWeight": 0.78,
+            "metaPressureWeight": 0.22,
+            "lowerStrengthWeight": 0.82,
+            "lowerPressureWeight": 0.18,
+        },
+        "hardFearless": {
+            "label": "hardFearless",
+            "metaStrengthWeight": 0.72,
+            "metaPressureWeight": 0.28,
+            "lowerStrengthWeight": 0.78,
+            "lowerPressureWeight": 0.22,
+        },
+    },
+    "tiers": [
+        {"tier": "OP", "minLower": 56, "maxPercentile": 0.08},
+        {"tier": "1", "minLower": 51, "maxPercentile": 0.22},
+        {"tier": "2", "minLower": 48, "maxPercentile": 0.45},
+        {"tier": "3", "minLower": 44, "maxPercentile": 0.7},
+    ],
+    "honey": {
+        "strengthGateStart": 50,
+        "strengthGateSpan": 15,
+        "residualDivisor": 20,
+        "residualExponent": 0.75,
+        "strengthGateExponent": 0.75,
+    },
+}
 
 
 def version_sort_key(version):
@@ -66,6 +122,20 @@ def load_js_json(path: Path):
     if raw.endswith(";"):
         raw = raw[:-1]
     return json.loads(raw)
+
+
+def load_score_model_spec():
+    try:
+        spec = json.loads(SCORE_MODEL_SPEC.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        spec = DEFAULT_SCORE_MODEL_SPEC
+    merged = json.loads(json.dumps(DEFAULT_SCORE_MODEL_SPEC))
+    for key, value in (spec or {}).items():
+        if isinstance(value, dict) and isinstance(merged.get(key), dict):
+            merged[key].update(value)
+        else:
+            merged[key] = value
+    return merged
 
 
 def first_existing(paths):
@@ -466,19 +536,177 @@ def effective_policy_sample_info(stats, replay_date_status):
     )
 
 
-def policy_meta_score(stat, sample_info, preset):
+def finite_float(value, fallback=math.nan):
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return fallback
+    return number if math.isfinite(number) else fallback
+
+
+def model_preset(score_model_spec, preset_id):
+    presets = score_model_spec.get("presets") or {}
+    return presets.get(preset_id) or presets.get("classic") or DEFAULT_SCORE_MODEL_SPEC["presets"]["classic"]
+
+
+def beta_posterior(successes, trials, prior_mean, kappa, z):
+    trials = max(0, int(trials or 0))
+    successes = clamp_value(float(successes or 0), 0, trials)
+    prior_mean = clamp_value(float(prior_mean), 0.001, 0.999)
+    kappa = max(0.01, float(kappa or 0.01))
+    alpha = successes + prior_mean * kappa
+    beta = max(0.001, trials - successes) + (1 - prior_mean) * kappa
+    total = alpha + beta
+    mean = alpha / total
+    sd = math.sqrt((alpha * beta) / ((total * total) * (total + 1)))
+    lower = clamp_value(mean - z * sd, 0, 1)
+    return {"mean": mean, "sd": sd, "lower": lower}
+
+
+def beta_rate_mean(successes, trials, prior_mean, kappa):
+    trials = max(0, int(trials or 0))
+    successes = clamp_value(float(successes or 0), 0, trials)
+    prior_mean = clamp_value(float(prior_mean), 0.001, 0.999)
+    kappa = max(0.01, float(kappa or 0.01))
+    return (successes + prior_mean * kappa) / (trials + kappa)
+
+
+def kappa_bounds(score_model_spec, sample_info, role_scoped=False):
+    groups = (score_model_spec.get("posterior") or {}).get("kappa") or {}
+    key = "role" if role_scoped else sample_info.get("mode") or "normal"
+    bounds = groups.get(key) or groups.get("normal") or [12, 80]
+    return float(bounds[0]), float(bounds[1])
+
+
+def estimate_win_prior(stats, sample_info, score_model_spec, role_scoped=False):
+    rows = []
+    total_wins = 0.0
+    total_picks = 0.0
+    for stat in (stats or {}).values():
+        picks = int(stat.get("pickCount") or 0)
+        wins = finite_float(stat.get("wins"), None)
+        win_rate = finite_float(stat.get("winRate"), None)
+        if picks <= 0:
+            continue
+        if wins is None and win_rate is not None:
+            wins = picks * win_rate / 100
+        if wins is None:
+            continue
+        wins = clamp_value(wins, 0, picks)
+        total_wins += wins
+        total_picks += picks
+        rows.append({"picks": picks, "rate": wins / picks})
+
+    fallback = float((score_model_spec.get("posterior") or {}).get("fallbackPriorMean") or 0.5)
+    mean = total_wins / total_picks if total_picks else fallback
+    mean = clamp_value(mean, 0.001, 0.999)
+    low, high = kappa_bounds(score_model_spec, sample_info, role_scoped)
+    if len(rows) < 2:
+        return {"mean": mean, "kappa": max(low, min(high, 24.0))}
+
+    observed_var = sum((row["rate"] - mean) ** 2 for row in rows) / max(1, len(rows) - 1)
+    noise_var = sum(mean * (1 - mean) / max(1, row["picks"]) for row in rows) / len(rows)
+    between_var = max(observed_var - noise_var, 0.0005)
+    kappa = mean * (1 - mean) / between_var - 1
+    return {"mean": mean, "kappa": clamp_value(kappa, low, high)}
+
+
+def source_counter(stat, field):
+    value = stat.get(field)
+    return value if isinstance(value, dict) else {}
+
+
+def estimate_source_baselines(stats, score_model_spec):
+    totals = defaultdict(float)
+    picks = defaultdict(float)
+    bans = defaultdict(float)
+    for stat in (stats or {}).values():
+        match_counts = source_counter(stat, "sourceMatchCounts")
+        pick_counts = source_counter(stat, "sourcePickCounts")
+        ban_counts = source_counter(stat, "sourceBanCounts")
+        for source, total in match_counts.items():
+            total = finite_float(total, 0)
+            if total <= 0:
+                continue
+            totals[source] += total
+            picks[source] += finite_float(pick_counts.get(source), 0)
+            bans[source] += finite_float(ban_counts.get(source), 0)
+
+    baselines = {}
+    for source, total in totals.items():
+        pick_base = clamp_value(picks[source] / total, 0.001, 0.999)
+        ban_base = clamp_value(bans[source] / total, 0.001, 0.999) if source != "solo" else None
+        presence = pick_base if source == "solo" else 1 - (1 - pick_base) * (1 - (ban_base or 0))
+        baselines[source] = {"pick": pick_base, "ban": ban_base, "presence": clamp_value(presence, 0.001, 0.999)}
+
+    if not baselines:
+        baselines["overall"] = {"pick": 0.1, "ban": 0.05, "presence": 0.145}
+    total_weight = sum(totals.values()) or 1
+    combined_presence = sum(
+        baselines[source]["presence"] * (totals.get(source) or 0)
+        for source in baselines
+    ) / total_weight
+    return {"bySource": baselines, "presence": clamp_value(combined_presence, 0.001, 0.999)}
+
+
+def build_policy_score_context(stats, sample_info, score_model_spec):
+    return {
+        "winPrior": estimate_win_prior(stats, sample_info, score_model_spec),
+        "exposure": estimate_source_baselines(stats, score_model_spec),
+    }
+
+
+def source_normalized_presence(stat, context, score_model_spec):
+    rate_kappa = float((score_model_spec.get("posterior") or {}).get("ratePriorKappa") or 20)
+    source_matches = source_counter(stat, "sourceMatchCounts")
+    source_picks = source_counter(stat, "sourcePickCounts")
+    source_bans = source_counter(stat, "sourceBanCounts")
+    baselines = (context.get("exposure") or {}).get("bySource") or {}
+    if source_matches:
+        weighted = 0.0
+        total_weight = 0.0
+        no_ban_data = False
+        for source, total in source_matches.items():
+            total = finite_float(total, 0)
+            if total <= 0:
+                continue
+            baseline = baselines.get(source) or baselines.get("overall") or {"pick": 0.1, "ban": 0.05}
+            pick_post = beta_rate_mean(source_picks.get(source), total, baseline.get("pick") or 0.1, rate_kappa)
+            if source == "solo":
+                presence = pick_post
+                no_ban_data = True
+            else:
+                ban_post = beta_rate_mean(source_bans.get(source), total, baseline.get("ban") or 0.05, rate_kappa)
+                presence = 1 - (1 - pick_post) * (1 - ban_post)
+            weighted += presence * total
+            total_weight += total
+        if total_weight:
+            return {
+                "presence": clamp_value(weighted / total_weight, 0, 1),
+                "noBanData": no_ban_data and total_weight > 0,
+            }
+
+    pick_rate = clamp_value(finite_float(stat.get("pickRate"), 0) / 100, 0, 1)
+    ban_rate_raw = finite_float(stat.get("banRate"), None)
+    if ban_rate_raw is None:
+        return {"presence": pick_rate, "noBanData": True}
+    ban_rate = clamp_value(ban_rate_raw / 100, 0, 1)
+    return {"presence": clamp_value(1 - (1 - pick_rate) * (1 - ban_rate), 0, 1), "noBanData": False}
+
+
+def score_model_entry(stat, sample_info, preset_id, score_model_spec, context):
     sample = int(stat.get("pickCount") or 0)
     min_sample = int(sample_info.get("minSample") or 5)
-    try:
-        raw_win_rate = float(stat.get("winRate"))
-    except (TypeError, ValueError):
-        raw_win_rate = math.nan
+    raw_win_rate = finite_float(stat.get("winRate"))
     if not math.isfinite(raw_win_rate) or sample < min_sample:
         reason = "missing win rate" if not math.isfinite(raw_win_rate) else f"sample {sample}/{min_sample}"
         return {
             "eligible": False,
             "tier": "-",
             "score": None,
+            "metaLower": None,
+            "strengthScore": None,
+            "draftPressureScore": None,
             "policyTier": "C",
             "policyOverall": 50.0,
             "sample": sample,
@@ -486,48 +714,75 @@ def policy_meta_score(stat, sample_info, preset):
             "reason": reason,
         }
 
-    weights = preset["weights"]
-    pick_rate = clamp_value(float(stat.get("pickRate") or 0), 0, 100)
-    ban_rate = clamp_value(float(stat.get("banRate") or 0), 0, 100)
-    confidence = clamp_value(sample / max(min_sample * 2, 12), 0, 1)
-    adjusted_win_rate = round1(50 + (raw_win_rate - 50) * confidence)
-    total_weight = weights["win"] + weights["pick"] + weights["ban"]
-    weighted = (
-        adjusted_win_rate * weights["win"]
-        + pick_rate * weights["pick"]
-        + ban_rate * weights["ban"]
-    ) / max(0.01, total_weight)
-    low_win_penalty = max(0, 45 - raw_win_rate) * 0.8
-    score = round1(clamp_value(weighted - low_win_penalty, 0, 100))
+    wins = finite_float(stat.get("wins"), sample * raw_win_rate / 100)
+    win_prior = context.get("winPrior") or {"mean": 0.5, "kappa": 24}
+    posterior_spec = score_model_spec.get("posterior") or {}
+    posterior = beta_posterior(
+        wins,
+        sample,
+        win_prior.get("mean", 0.5),
+        win_prior.get("kappa", 24),
+        posterior_spec.get("z", 0.84),
+    )
+    strength_spec = score_model_spec.get("strength") or {}
+    strength_score = 100 * (
+        float(strength_spec.get("meanWeight", 0.7)) * posterior["mean"]
+        + float(strength_spec.get("lowerWeight", 0.3)) * posterior["lower"]
+    )
+    strength_lower = 100 * posterior["lower"]
+    exposure = source_normalized_presence(stat, context, score_model_spec)
+    baseline_presence = (context.get("exposure") or {}).get("presence") or 0.1
+    pressure_spec = score_model_spec.get("pressure") or {}
+    eps = float(pressure_spec.get("eps") or 0.001)
+    scale = float(pressure_spec.get("scale") or 16)
+    draft_pressure_score = clamp_value(
+        50 + scale * math.log((exposure["presence"] + eps) / (baseline_presence + eps)),
+        0,
+        100,
+    )
+    preset = model_preset(score_model_spec, preset_id)
+    score = (
+        float(preset.get("metaStrengthWeight", 0.78)) * strength_score
+        + float(preset.get("metaPressureWeight", 0.22)) * draft_pressure_score
+    )
+    meta_lower = (
+        float(preset.get("lowerStrengthWeight", 0.82)) * strength_lower
+        + float(preset.get("lowerPressureWeight", 0.18)) * draft_pressure_score
+    )
+    reliability = math.sqrt(sample / max(1, sample + min_sample * 2))
     return {
         "eligible": True,
         "tier": "4",
-        "score": score,
+        "score": round1(clamp_value(score, 0, 100)),
+        "metaLower": round1(clamp_value(meta_lower, 0, 100)),
+        "strengthScore": round1(clamp_value(strength_score, 0, 100)),
+        "strengthLower": round1(clamp_value(strength_lower, 0, 100)),
+        "draftPressureScore": round1(draft_pressure_score),
+        "presence": round1(exposure["presence"] * 100),
+        "baselinePresence": round1(baseline_presence * 100),
+        "reliability": round1(reliability * 100),
+        "noBanData": exposure.get("noBanData", False),
         "policyTier": "D",
-        "policyOverall": score,
+        "policyOverall": round1(clamp_value(score, 0, 100)),
         "sample": sample,
         "minSample": min_sample,
         "winRate": raw_win_rate,
-        "adjustedWinRate": adjusted_win_rate,
-        "pickRate": pick_rate,
-        "banRate": ban_rate,
-        "lowWinPenalty": round1(low_win_penalty),
+        "posteriorMean": round1(posterior["mean"] * 100),
+        "posteriorLower": round1(posterior["lower"] * 100),
+        "posteriorSd": round1(posterior["sd"] * 100),
+        "priorMean": round1((win_prior.get("mean") or 0.5) * 100),
+        "priorKappa": round1(win_prior.get("kappa") or 0),
     }
 
 
-def meta_tier_for_policy_rank(entry, index, total):
-    if not entry.get("eligible") or entry.get("score") is None or not total:
+def meta_tier_for_policy_rank(entry, index, total, score_model_spec=None):
+    if not entry.get("eligible") or entry.get("metaLower") is None or not total:
         return "-"
     percentile = (index + 1) / total
-    score = entry["score"]
-    if score >= 58 and percentile <= 0.08:
-        return "OP"
-    if score >= 52 and percentile <= 0.22:
-        return "1"
-    if score >= 48 and percentile <= 0.45:
-        return "2"
-    if score >= 43 and percentile <= 0.7:
-        return "3"
+    score = entry["metaLower"]
+    for row in (score_model_spec or DEFAULT_SCORE_MODEL_SPEC).get("tiers", []):
+        if score >= float(row.get("minLower") or 0) and percentile <= float(row.get("maxPercentile") or 1):
+            return row.get("tier") or "4"
     return "4"
 
 
@@ -544,14 +799,17 @@ def select_policy_stats(combined_stats, stats_by_patch, patch_versions):
     return combined_stats, "all", "overall all patches"
 
 
-def build_policy_exports(champions, stats, generated_at, save_path, patch_key, source_label, replay_date_status):
-    preset = policy_preset()
+def build_policy_exports(champions, stats, generated_at, save_path, patch_key, source_label, replay_date_status, score_model_spec):
+    legacy_preset = policy_preset()
+    preset_id = legacy_preset["label"]
+    preset = model_preset(score_model_spec, preset_id)
     sample_info = effective_policy_sample_info(stats, replay_date_status)
+    context = build_policy_score_context(stats, sample_info, score_model_spec)
     entries = []
     for champ in champions:
         champion_id = champ["id"]
         stat = stats.get(champion_id, {})
-        info = policy_meta_score(stat, sample_info, preset)
+        info = score_model_entry(stat, sample_info, preset_id, score_model_spec, context)
         entry = {
             "championId": champion_id,
             "championName": champ.get("name") or champion_id,
@@ -564,6 +822,7 @@ def build_policy_exports(champions, stats, generated_at, save_path, patch_key, s
     eligible = sorted(
         [entry for entry in entries if entry["eligible"]],
         key=lambda entry: (
+            float(entry.get("metaLower") or -1),
             float(entry.get("score") or -1),
             float(entry.get("winRate") or -1),
             int(entry.get("pickCount") or 0),
@@ -572,7 +831,7 @@ def build_policy_exports(champions, stats, generated_at, save_path, patch_key, s
         reverse=True,
     )
     for index, entry in enumerate(eligible):
-        meta_tier = meta_tier_for_policy_rank(entry, index, len(eligible))
+        meta_tier = meta_tier_for_policy_rank(entry, index, len(eligible), score_model_spec)
         entry["tier"] = meta_tier
         entry["policyTier"] = POLICY_TIER_MAP.get(meta_tier, "C")
         entry["rank"] = index + 1
@@ -590,6 +849,11 @@ def build_policy_exports(champions, stats, generated_at, save_path, patch_key, s
                 "eligible": entry["eligible"],
                 "metaTier": entry.get("tier") or "-",
                 "score": entry.get("score"),
+                "metaLower": entry.get("metaLower"),
+                "strengthScore": entry.get("strengthScore"),
+                "draftPressureScore": entry.get("draftPressureScore"),
+                "presence": entry.get("presence"),
+                "reliability": entry.get("reliability"),
                 "pickCount": entry.get("pickCount"),
                 "winRate": entry.get("winRate"),
                 "reason": entry.get("reason"),
@@ -611,9 +875,20 @@ def build_policy_exports(champions, stats, generated_at, save_path, patch_key, s
         "patch": patch_key,
         "scope": "overall",
         "role": "all",
-        "preset": preset["label"],
-        "weights": preset["weights"],
+        "modelVersion": score_model_spec.get("modelVersion"),
+        "preset": preset.get("label") or preset_id,
+        "weights": {
+            "strength": preset.get("metaStrengthWeight"),
+            "draftPressure": preset.get("metaPressureWeight"),
+            "lowerStrength": preset.get("lowerStrengthWeight"),
+            "lowerPressure": preset.get("lowerPressureWeight"),
+        },
         "sample": sample_info,
+        "winPrior": {
+            "mean": round1((context.get("winPrior", {}).get("mean") or 0.5) * 100),
+            "kappa": round1(context.get("winPrior", {}).get("kappa") or 0),
+        },
+        "baselinePresence": round1((context.get("exposure", {}).get("presence") or 0) * 100),
         "eligibleCount": len(eligible),
         "rowCount": len(rows),
     }
@@ -629,8 +904,11 @@ def render_policy_tsv(policy):
         f"# Save: {meta.get('save') or ''}",
         f"# Source: {meta.get('source')}",
         f"# Patch: {meta.get('patch')}",
+        f"# Model: {meta.get('modelVersion')}",
         f"# Preset: {meta.get('preset')} weights={json.dumps(meta.get('weights'), sort_keys=True)}",
         f"# Sample: {meta.get('sample', {}).get('mode')} min={meta.get('sample', {}).get('minSample')} reason={meta.get('sample', {}).get('reason')}",
+        f"# WinPrior: mean={meta.get('winPrior', {}).get('mean')} kappa={meta.get('winPrior', {}).get('kappa')}",
+        f"# BaselinePresence: {meta.get('baselinePresence')}",
         "# Format: champion_id<TAB>tier<TAB>overall",
         "# Non-eligible or low-sample champions are emitted as neutral C/50.0 so native AI keeps its base score.",
         "# champion_id\ttier\toverall",
@@ -657,6 +935,13 @@ def write_policy_file(text, paths, optional_paths=None):
         except OSError as exc:
             skipped.append({"path": str(path), "reason": str(exc)})
     return written, skipped
+
+
+def write_text_atomic(path: Path, text: str, encoding="utf-8"):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(path.name + ".tmp")
+    tmp.write_bytes(text.encode(encoding))
+    tmp.replace(path)
 
 
 def write_policy_exports(policy):
@@ -2257,19 +2542,25 @@ def add_player_stat(stats, champion, won, player, source):
 
 def finalize_aggregated_stats(stats, total_match, source, item_catalog=None):
     finalized = {}
+    source_key = "solo" if "solo" in str(source).lower() else "tournament"
     for champion, row in stats.items():
         matches = row["pickCount"]
         wins = row["wins"]
         losses = row["losses"]
+        bans = row.get("banCount", 0)
         out = {
             "pickCount": matches,
-            "banCount": row.get("banCount", 0),
+            "banCount": bans,
             "wins": wins,
             "losses": losses,
             "winRate": round(wins / matches * 100, 1) if matches else None,
             "pickRate": round(matches / total_match * 100, 1) if total_match else None,
-            "banRate": round(row.get("banCount", 0) / total_match * 100, 1) if total_match else None,
-            "banPickRate": round((matches + row.get("banCount", 0)) / total_match * 100, 1) if total_match else None,
+            "banRate": None if source_key == "solo" else round(bans / total_match * 100, 1) if total_match else None,
+            "banPickRate": round(matches / total_match * 100, 1)
+            if source_key == "solo" and total_match
+            else round((matches + bans) / total_match * 100, 1)
+            if total_match
+            else None,
             "dealt": row["dealt"],
             "taken": row["taken"],
             "healing": row["healing"],
@@ -2285,6 +2576,11 @@ def finalize_aggregated_stats(stats, total_match, source, item_catalog=None):
             "linePhase": dict(row["linePhase"]) if row["linePhase"] else None,
             "byPosition": {pos: dict(values) for pos, values in row["byPosition"].items()},
             "totalMatch": total_match,
+            "pickOpportunities": total_match,
+            "banOpportunities": None if source_key == "solo" else total_match,
+            "sourceMatchCounts": {source_key: total_match},
+            "sourcePickCounts": {source_key: matches},
+            "sourceBanCounts": {source_key: 0 if source_key == "solo" else bans},
             "source": source,
             "confidence": "exported",
         }
@@ -3272,6 +3568,11 @@ def merge_stats(champions, news_rows, draft_scan, exported_stats):
                     "linePhase": row.get("linePhase"),
                     "byPosition": row.get("byPosition"),
                     "totalMatch": total_match,
+                    "pickOpportunities": total_match,
+                    "banOpportunities": total_match,
+                    "sourceMatchCounts": {"tournament": total_match or 0},
+                    "sourcePickCounts": {"tournament": pick or 0},
+                    "sourceBanCounts": {"tournament": row.get("banCount") or 0},
                     "source": row.get("source", "meta_exporter_debug"),
                     "confidence": "exported",
                 }
@@ -3319,6 +3620,11 @@ def empty_display_stat(draft_mentions=0):
         "topItems": [],
         "linePhase": None,
         "byPosition": None,
+        "pickOpportunities": None,
+        "banOpportunities": None,
+        "sourceMatchCounts": None,
+        "sourcePickCounts": None,
+        "sourceBanCounts": None,
         "draftMentions": draft_mentions,
         "source": "not_collected",
         "confidence": "none",
@@ -3350,6 +3656,8 @@ def combine_scope_stats(champions, tournament, solo, draft_scan, item_catalog=No
         wins = (t.get("wins") or 0) + (s.get("wins") or 0)
         losses = (t.get("losses") or 0) + (s.get("losses") or 0)
         bans = t.get("banCount") or 0
+        tournament_picks = t.get("pickCount") or 0
+        solo_picks = s.get("pickCount") or 0
         line_phase = merge_counter_dicts(t.get("linePhase"), s.get("linePhase"))
         by_position = merge_position_dicts(t.get("byPosition"), s.get("byPosition"))
         item_counts = merge_counter_dicts(t.get("itemCounts"), s.get("itemCounts"))
@@ -3378,6 +3686,11 @@ def combine_scope_stats(champions, tournament, solo, draft_scan, item_catalog=No
                     "linePhase": line_phase,
                     "byPosition": by_position,
                     "totalMatch": total,
+                    "pickOpportunities": total,
+                    "banOpportunities": tournament_total or None,
+                    "sourceMatchCounts": {"tournament": tournament_total, "solo": solo_total},
+                    "sourcePickCounts": {"tournament": tournament_picks, "solo": solo_picks},
+                    "sourceBanCounts": {"tournament": bans, "solo": 0},
                     "source": "combined_export",
                     "confidence": "exported",
                 }
@@ -3408,6 +3721,41 @@ def normalize_split_stats_by_patch(champions, split_stats_by_patch, draft_scan):
         }
         for axis, versions in split_stats_by_patch.items()
     }
+
+
+def strip_internal_score_fields_from_stats(stats):
+    if not isinstance(stats, dict):
+        return
+    for row in stats.values():
+        if isinstance(row, dict):
+            for field in INTERNAL_SCORE_FIELDS:
+                row.pop(field, None)
+
+
+def strip_internal_score_fields_from_split(split_payload):
+    if not isinstance(split_payload, dict):
+        return
+    for groups in (split_payload.get("stats") or {}).values():
+        if isinstance(groups, dict):
+            for rows in groups.values():
+                strip_internal_score_fields_from_stats(rows)
+    for versions in (split_payload.get("statsByPatch") or {}).values():
+        if isinstance(versions, dict):
+            for groups in versions.values():
+                if isinstance(groups, dict):
+                    for rows in groups.values():
+                        strip_internal_score_fields_from_stats(rows)
+
+
+def strip_internal_score_fields_for_payload(*stats_groups, split_payloads=None, stats_by_patch=None):
+    for stats in stats_groups:
+        strip_internal_score_fields_from_stats(stats)
+    for scope_group in (stats_by_patch or {}).values():
+        if isinstance(scope_group, dict):
+            for stats in scope_group.values():
+                strip_internal_score_fields_from_stats(stats)
+    for split_payload in split_payloads or []:
+        strip_internal_score_fields_from_split(split_payload)
 
 
 def split_count(split_payload, axis, key):
@@ -3561,6 +3909,7 @@ def main():
             "Re-extract the dashboard package. It should include data\\banpick-data.js and assets\\."
         )
     base = load_js_json(BANPICK_DATA)
+    score_model_spec = load_score_model_spec()
     champions = base["champions"]
     champion_ids = [champ["id"] for champ in champions]
     item_catalog = load_item_catalog()
@@ -3827,8 +4176,16 @@ def main():
         policy_patch,
         policy_source,
         replay_date_status,
+        score_model_spec,
     )
     policy_export_status = write_policy_exports(policy_exports)
+    strip_internal_score_fields_for_payload(
+        combined_stats,
+        tournament_stats,
+        solo_stats,
+        split_payloads=[tournament_splits, solo_splits, combined_splits],
+        stats_by_patch=stats_by_patch,
+    )
     region_order = {key: index for index, key in enumerate(LEAGUE_KEY_FALLBACKS)}
     league_meta_list = sorted(
         league_meta.values(),
@@ -3859,6 +4216,7 @@ def main():
 
     payload = {
         "generatedAt": generated_at,
+        "scoreModelSpec": score_model_spec,
         "save": {
             "path": str(save_path) if save_path else None,
             "lastModified": datetime.fromtimestamp(save_path.stat().st_mtime).isoformat(timespec="seconds") if save_path else None,
@@ -3948,10 +4306,9 @@ def main():
         ],
     }
 
-    OUT.parent.mkdir(parents=True, exist_ok=True)
-    OUT.write_text(
+    write_text_atomic(
+        OUT,
         "window.TFM2_META_DATA = " + json.dumps(payload, ensure_ascii=False, indent=2) + ";\n",
-        encoding="utf-8",
     )
     core_item_build_paths = write_core_item_builds(core_item_builds)
     print(f"Wrote {OUT}")
