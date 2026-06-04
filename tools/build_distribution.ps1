@@ -191,6 +191,8 @@ if ($builtExe) {
 Copy-Item -LiteralPath $readmeSrc -Destination (Join-Path $payloadRoot "README.md") -Force
 $dashboardDest = Join-Path $payloadRoot "dashboard_app"
 Copy-CleanDirectory -Source $dashboardSrc -Destination $dashboardDest
+$dashboardBundledMod = Join-Path $dashboardDest "mods\tfm2_meta_item_delegate"
+Copy-CleanDirectory -Source $modSrc -Destination $dashboardBundledMod
 Ensure-DashboardPythonRuntime -DashboardDestination $dashboardDest -CacheDirectory $outRoot
 $dashboardShellDest = Join-Path $payloadRoot "dashboard_shell"
 Copy-DashboardShell -DashboardProject $dashboardProject -Destination $dashboardShellDest -CacheDirectory $outRoot
@@ -232,19 +234,19 @@ try {
     $sha = "nogit"
     $fullSha = "nogit"
 }
-$version = "0.4.7+$sha"
+$version = "0.4.8+$sha"
 $manifest = [ordered]@{
     name = "TFM2.gg"
     packageVersion = $version
     sourceRevision = $fullSha
     packageLayoutVersion = 2
     dashboardInstallDir = "TFM2.gg"
-    targetGameVersion = "0.4.7"
+    targetGameVersion = "0.4.8"
     repository = "hexase1-ship-it/TFM2.gg"
     releaseAsset = "TFM2.gg_Distribution.zip"
     expectedGameFiles = [ordered]@{
-        "TeamfightManager2.exe" = 62701568
-        "bundle.game_data" = 1118940252
+        "TeamfightManager2.exe" = 63621632
+        "bundle.game_data" = 1119325519
     }
     generatedAt = (Get-Date).ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ssZ")
 }

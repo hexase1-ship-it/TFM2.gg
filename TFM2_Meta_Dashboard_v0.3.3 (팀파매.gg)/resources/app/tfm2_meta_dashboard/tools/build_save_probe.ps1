@@ -24,7 +24,7 @@ if (-not $SdkRoot) {
 }
 
 if (-not $SdkRoot -or -not (Test-Path -LiteralPath $SdkRoot)) {
-    throw "TFM2 0.4.7 Mod SDK was not found. Pass -SdkRoot <path-to-mod-sdk>."
+    throw "TFM2 compatible Mod SDK was not found. Pass -SdkRoot <path-to-mod-sdk>."
 }
 
 $deps = Join-Path $SdkRoot "deps"

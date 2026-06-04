@@ -242,7 +242,7 @@ fn direction_from_str(value: &str) -> Option<ItemBuildOverride> {
         "MagicResistance" => Some(ItemBuildOverride::MagicResistance),
         "Hp" => Some(ItemBuildOverride::Hp),
         "Auto" => Some(ItemBuildOverride::Auto),
-        // Teamfight Manager 2 exposes no separate armor/defense item override in 0.4.7.
+        // Teamfight Manager 2 exposes no separate armor/defense item override in 0.4.8.
         "Defense" => Some(ItemBuildOverride::Hp),
         _ => None,
     }
@@ -318,7 +318,7 @@ fn remember_apply_signature(signature: String) -> bool {
 }
 
 fn init(_ctx: &GameCtx) -> ModRegistration {
-    log_line("mod: init 0.4.7 client item delegate".to_string());
+    log_line("mod: init 0.4.8 client item delegate".to_string());
 
     let mut reg = ModRegistration::new(MOD_ID);
     reg.set_extension(MetaItemDelegateClient);

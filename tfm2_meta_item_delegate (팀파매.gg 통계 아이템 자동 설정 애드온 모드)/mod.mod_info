@@ -1,11 +1,11 @@
 {
   "name": "TFM2 Meta Item Delegate",
   "author": "KMK",
-  "version": "0.2.2",
+  "version": "0.2.3",
   "description": "Automatically syncs champion personal item directions from core-item-builds.json meta statistics.",
-  "last_updated": "2026-06-02",
+  "last_updated": "2026-06-04",
   "dependencies": [
-    { "mod_id": "base", "version": ">=0.4.7" }
+    { "mod_id": "base", "version": ">=0.4.8" }
   ],
   "tags": ["Management", "Strategy", "Items", "Automation"]
 }

@@ -29,7 +29,7 @@ RELEASE_API = f"https://api.github.com/repos/{REPO_FULL_NAME}/releases/latest"
 RELEASE_ASSET_NAME = "TFM2.gg_Distribution.zip"
 RELEASE_PAGE_URL = f"https://github.com/{REPO_FULL_NAME}/releases/tag/latest"
 DIRECT_DOWNLOAD_URL = f"https://github.com/{REPO_FULL_NAME}/releases/download/latest/{RELEASE_ASSET_NAME}"
-TARGET_GAME_VERSION = "0.4.7"
+TARGET_GAME_VERSION = "0.4.8"
 PACKAGE_LAYOUT_VERSION = 2
 DASHBOARD_INSTALL_DIR_NAME = APP_NAME
 DASHBOARD_EXE_NAME = "TFM2MetaDashboard.exe"
@@ -60,8 +60,8 @@ MOD_PACKAGE_DIR_NAME = "tfm2_meta_item_delegate (팀파매.gg 통계 아이템 �
 SOURCE_DASHBOARD_DIR_NAME = "TFM2_Meta_Dashboard_v0.3.3 (팀파매.gg)"
 
 EXPECTED_GAME_FILES = {
-    "TeamfightManager2.exe": 62_701_568,
-    "bundle.game_data": 1_118_940_252,
+    "TeamfightManager2.exe": 63_621_632,
+    "bundle.game_data": 1_119_325_519,
 }
 
 DEFAULT_GAME_DIR = Path(r"C:\Program Files (x86)\Steam\steamapps\common\Teamfight Manager2")
@@ -388,7 +388,7 @@ class InstallerModel:
             actual = file_path.stat().st_size
             if int(actual) == int(expected_size):
                 size_matches += 1
-                checks.append(ComponentStatus(True, name, "0.4.7 기준 파일 크기 일치"))
+                checks.append(ComponentStatus(True, name, "0.4.8 기준 파일 크기 일치"))
             else:
                 checks.append(
                     ComponentStatus(
