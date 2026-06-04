@@ -4,7 +4,7 @@
     "saveFile":  "save_20260603_054305.data",
     "message":  "dashboard data refreshed",
     "lastChangeAt":  null,
-    "lastRefreshAt":  1780552353,
+    "lastRefreshAt":  1780569714,
     "refreshCount":  1,
     "pollSeconds":  3,
     "error":  null

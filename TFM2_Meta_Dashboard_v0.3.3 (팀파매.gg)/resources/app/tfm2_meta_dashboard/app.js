@@ -2241,7 +2241,7 @@ function renderMatchView() {
   const allRows = DATA.matchAnalysis || [];
   if (!allRows.length) {
     if (DATA.sources.metaExportUsable === false) {
-      container.innerHTML = `<p class="notice warning-notice">Meta Exporter 또는 Save Probe가 현재 게임 0.4.8 DB 구조 일부와 맞지 않아 예전 리플레이 export 파일을 무시했어. 0.4.8용 진단 도구가 정상 추출될 때까지 신규 경기 분석은 제한될 수 있어.</p>`;
+      container.innerHTML = `<p class="notice warning-notice">Meta Exporter 또는 Save Probe가 현재 게임 0.4.9 DB 구조 일부와 맞지 않아 예전 리플레이 export 파일을 무시했어. 0.4.9용 진단 도구가 정상 추출될 때까지 신규 경기 분석은 제한될 수 있어.</p>`;
       return;
     }
     if (DATA.sources.saveProbe) {

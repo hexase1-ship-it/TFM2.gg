@@ -294,7 +294,7 @@ try {
     $sha = "nogit"
     $fullSha = "nogit"
 }
-$version = "0.4.8+$sha"
+$version = "0.4.9+$sha"
 $manifest = [ordered]@{
     name = "TFM2.gg"
     packageVersion = $version
@@ -302,12 +302,12 @@ $manifest = [ordered]@{
     dashboardRevision = $dashboardRevision
     packageLayoutVersion = 2
     dashboardInstallDir = "TFM2.gg"
-    targetGameVersion = "0.4.8"
+    targetGameVersion = "0.4.9"
     repository = "hexase1-ship-it/TFM2.gg"
     releaseAsset = "TFM2.gg_Distribution.zip"
     expectedGameFiles = [ordered]@{
-        "TeamfightManager2.exe" = 63621632
-        "bundle.game_data" = 1119325519
+        "TeamfightManager2.exe" = 63971328
+        "bundle.game_data" = 1119929218
     }
     generatedAt = (Get-Date).ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ssZ")
 }
@@ -324,7 +324,7 @@ $updateInfo = [ordered]@{
     sourceRevision = $fullSha
     dashboardRevision = $dashboardRevision
     packageLayoutVersion = 2
-    targetGameVersion = "0.4.8"
+    targetGameVersion = "0.4.9"
     repository = "hexase1-ship-it/TFM2.gg"
     releaseAsset = "TFM2.gg_Distribution.zip"
     generatedAt = $manifest.generatedAt
