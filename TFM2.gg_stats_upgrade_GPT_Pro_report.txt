@@ -1,0 +1,740 @@
+TFM2.gg 통계 시스템 고도화 자문 요청 보고서
+작성일: 2026-06-05
+
+이 문서는 Teamfight Manager 2용 TFM2.gg 메타 대시보드의 통계 계산 로직을 전면 고도화하기 위해 GPT Pro에게 자문을 구하는 붙여넣기용 보고서입니다.
+아래 내용을 읽고, 현재 산식의 통계적 약점과 안정적인 개선 방향을 제안해 주세요.
+
+
+1. 프로젝트 배경
+
+프로젝트명: TFM2.gg
+대상 게임: Teamfight Manager 2
+현재 대응 버전: 0.4.9 기준
+주요 목적:
+- 세이브/진단 export에서 챔피언별 메타 통계를 산출한다.
+- 대회, 솔로랭크, 전체 통계를 나누어 볼 수 있게 한다.
+- 지역별 통계, 1부/2부, 국제전, 솔랭 지역 통계를 지원한다.
+- 메타 스코어와 메타 티어를 계산한다.
+- 새 보조 지표인 꿀챔 점수를 계산한다.
+- 향후 게임 내 애드온 정책 TSV에도 안정적으로 연결한다.
+
+현재 주요 코드:
+- 대시보드 UI 계산:
+  C:/팀파매2 모딩/1_모딩/타 모드/팀파매.gg/TFM2_Meta_Dashboard_v0.3.3 (팀파매.gg)/resources/app/tfm2_meta_dashboard/app.js
+- 데이터 생성기:
+  C:/팀파매2 모딩/1_모딩/타 모드/팀파매.gg/TFM2_Meta_Dashboard_v0.3.3 (팀파매.gg)/resources/app/tfm2_meta_dashboard/tools/build_meta_data.py
+- 생성 데이터:
+  C:/팀파매2 모딩/1_모딩/타 모드/팀파매.gg/TFM2_Meta_Dashboard_v0.3.3 (팀파매.gg)/resources/app/tfm2_meta_dashboard/data/meta-data.js
+
+현재 샘플 데이터 규모:
+- 패치 버전: 2026.0.0, 2026.0.1, 2026.1.0, 2026.1.1, 2026.1.2, 2026.2.0, 2026.3.0
+- 전체 리플레이 분석 행: 4138
+- 대회 리플레이: 3303
+- 솔로랭크 리플레이: 835
+- 날짜 배정: 3026 / 4138
+- 날짜 confidence:
+  - high: 2038
+  - medium: 153
+  - exported: 835
+- 날짜 source:
+  - league_schedule_inferred: 2038
+  - tournament_schedule_inferred: 153
+  - solo_rank_match_exported: 835
+
+
+2. 현재 통계 데이터 생성 구조
+
+2.1 기본 통계 단위
+
+데이터 생성기는 챔피언별로 다음 값을 누적한다.
+
+- pickCount: 실제 픽 횟수
+- banCount: 밴 횟수
+- wins: 픽한 경기에서 승리한 횟수
+- losses: 픽한 경기에서 패배한 횟수
+- dealt, taken, healing, kills, deaths, assists, cs, gold, rating, level
+- itemCounts, topItems
+- byPosition:
+  - position별 matches, wins, dealing, tanking, healing, kills, deaths, assists, cs, rating, level
+- linePhase
+- totalMatch: 해당 통계 scope의 전체 경기 수
+- source, confidence
+
+누적 기본 로직:
+
+pickCount += 1
+wins += 1 if champion side won else 0
+losses += 1 if champion side lost else 0
+킬/데스/어시스트/딜/탱/힐/CS 등은 단순 합산
+position이 있으면 byPosition[position]에도 같은 방식으로 누적
+
+최종 비율 계산:
+
+winRate = wins / pickCount * 100
+pickRate = pickCount / totalMatch * 100
+banRate = banCount / totalMatch * 100
+banPickRate = (pickCount + banCount) / totalMatch * 100
+
+주의:
+- 대회에는 밴 데이터가 있다.
+- 솔로랭크에는 밴 데이터가 없다.
+- 전체 통계는 대회 + 솔로랭크를 합친다.
+
+
+2.2 대회 통계
+
+대회 통계는 크게 두 경로가 있다.
+
+1. champion_patch_statistics.debug.txt 기반 집계
+   - 게임/세이브 export에 있는 챔피언 패치 통계 자료를 읽는다.
+   - 현재 전체 대회 통계의 주요 원천이다.
+
+2. match_replays.debug.txt 기반 리플레이 분석
+   - 실제 MatchReplayData를 파싱한다.
+   - 팀, 선수, 밴픽, 승패, 챔피언, 포지션, 아이템, 경기 성과를 읽는다.
+   - 지역/리그/1부/2부/국제전 분할 통계에 사용한다.
+   - aggregate_match_analysis_stats()는 현재 source == "tournament"인 행만 통계에 넣는다.
+
+대회 분할 축:
+- league
+- region
+- division
+- regionDivision
+- competition
+
+대회 리플레이 날짜:
+- MatchReplayData 안에는 날짜가 직접 없다.
+- match_stats.debug.txt + teams.debug.txt + year_schedules.debug.txt를 이용해 일정 기반으로 날짜를 추정한다.
+- 리그 일정 추정은 high confidence.
+- 토너먼트 일정 추정은 medium confidence.
+
+
+2.3 솔로랭크 통계
+
+솔로랭크 통계는 solo_rank_matches.debug.txt의 SoloRankMatch를 파싱한다.
+
+조건:
+- played: true인 솔랭 경기만 사용한다.
+- blue_team_win을 읽어 승패를 결정한다.
+- blue_team / red_team의 SoloRankAthlete에서 챔피언, 포지션, 아이템, KDA, CS, 딜/힐/탱킹, rating 등을 읽는다.
+- region_id를 regionKey로 변환한다.
+- version을 패치 키로 사용한다.
+
+솔로랭크 통계 축:
+- 전체 솔랭
+- 패치별 솔랭
+- 지역별 솔랭
+- 패치 + 지역별 솔랭
+- 관계/카운터/라인 시너지
+
+솔로랭크 리플레이:
+- 최근 개선으로 SoloRankMatch도 matchAnalysis에 source == "solo"로 포함한다.
+- id는 충돌 방지를 위해 "solo:4788" 같은 문자열 키를 사용한다.
+- date/result_time은 원본 export 날짜로 사용한다.
+- dateConfidence는 exported.
+- 솔랭에는 밴이 없으므로 bans는 빈 배열이다.
+- 실제 경기 시간이 없으므로 durationSec은 null이다.
+
+
+2.4 전체 통계
+
+전체 통계는 대회 통계와 솔로랭크 통계를 combine_scope_stats()에서 합친다.
+
+현재 산식:
+
+tournament_total = 대회 totalMatch
+solo_total = 솔랭 totalMatch
+total = tournament_total + solo_total
+
+picks = tournament.pickCount + solo.pickCount
+wins = tournament.wins + solo.wins
+losses = tournament.losses + solo.losses
+bans = tournament.banCount only
+
+winRate = wins / picks * 100
+pickRate = picks / total * 100
+banRate = bans / tournament_total * 100
+banPickRate = (picks + bans) / total * 100
+
+주의할 점:
+- banRate는 대회 분모만 사용한다.
+- pickRate는 대회 + 솔랭 전체 분모를 사용한다.
+- banPickRate는 picks + bans를 전체 total로 나누는데, 솔랭에는 밴이 없기 때문에 노출도 해석이 애매할 수 있다.
+- 대회와 솔랭은 데이터 성격이 다르다. 대회는 밴픽/팀 전략/리그 구조가 있고, 솔랭은 개인 능력치와 랜덤 매칭 성격이 강하다.
+
+
+2.5 역할별 통계
+
+UI에서 역할 필터를 적용하면 displayStatOf()가 byPosition 데이터를 사용한다.
+
+현재 역할별 값:
+
+role matches = stat.byPosition[role].matches
+role wins = stat.byPosition[role].wins
+role winRate = role wins / role matches * 100
+role total = 모든 챔피언의 byPosition[role].matches 합
+role pickRate = role matches / role total * 100
+banRate = 전체 stat.banRate를 그대로 사용
+banPickRate = role pickRate + 전체 banRate
+
+주의할 점:
+- 역할별 banRate가 따로 없다.
+- 밴은 챔피언 단위이지 역할 단위가 아니므로 현재는 전체 밴률을 역할 통계에 그대로 붙인다.
+- 다중 역할 챔피언의 밴을 어떤 역할에 귀속해야 하는지 아직 모델링되어 있지 않다.
+- role total denominator가 실제 경기 수가 아니라 role별 등장 수 합산이다.
+
+
+3. 현재 메타 스코어 계산
+
+3.1 티어 프리셋
+
+현재 UI 프리셋:
+
+classic:
+  win = 1.00
+  pick = 0.20
+  ban = 0.20
+
+fearless:
+  win = 1.00
+  pick = 0.18
+  ban = 0.55
+
+hardFearless:
+  win = 1.00
+  pick = 0.15
+  ban = 0.85
+
+의도:
+- 클래식은 승률 중심, 픽/밴 보조 반영.
+- 피어리스/하드피어리스는 밴률을 더 강하게 반영.
+- 하드피어리스에서는 강한 픽이 자주 밴되어 픽률이 낮아질 수 있으므로 밴률 중요도를 높였다.
+
+
+3.2 표본 기준
+
+sampleMode:
+- early: 최소 5픽
+- normal: 최소 10픽
+- auto:
+  - replayDateInference.daysSincePatch가 있으면:
+    - 3일 이상: normal, 최소 10픽
+    - 3일 미만: early, 최소 5픽
+  - daysSincePatch가 없으면:
+    - scopedSampleVolume >= 100이면 normal, 최소 10픽
+    - 그 외 early, 최소 5픽
+
+scopedSampleVolume:
+- 현재 scope의 stats를 본다.
+- role == all:
+  - totalPicks / 10을 estimatedMatches로 사용
+- role != all:
+  - role별 totalPicks / 2를 estimatedMatches로 사용
+- totalMatches와 estimatedMatches 중 큰 값을 사용
+
+의도:
+- 패치 초반에는 5픽부터 지표를 보여준다.
+- 충분히 경기가 쌓이면 10픽 기준으로 엄격하게 본다.
+
+문제 가능성:
+- 5픽/10픽은 매우 단순한 cutoff이다.
+- 표본 수가 11과 100인 챔피언의 신뢰도 차이를 충분히 표현하지 못한다.
+- 역할별 표본은 특히 작기 때문에 더 강한 보정이 필요할 수 있다.
+
+
+3.3 메타 스코어 공식
+
+현재 UI 공식:
+
+sample = pickCount
+rawWinRate = winRate
+minSample = effectiveSampleInfo().minSample
+
+if rawWinRate is not finite or sample < minSample:
+  eligible = false
+  score = null
+  tier = "-"
+
+else:
+  pickRate = clamp(stat.pickRate, 0, 100)
+  banRate = clamp(stat.banRate, 0, 100)
+  confidence = clamp(sample / max(minSample * 2, 12), 0, 1)
+  adjustedWinRate = 50 + (rawWinRate - 50) * confidence
+  totalWeight = winWeight + pickWeight + banWeight
+  weighted =
+    (adjustedWinRate * winWeight
+     + pickRate * pickWeight
+     + banRate * banWeight) / totalWeight
+  lowWinPenalty = max(0, 45 - rawWinRate) * 0.8
+  score = clamp(weighted - lowWinPenalty, 0, 100)
+
+반올림:
+- adjustedWinRate와 score는 소수점 1자리.
+
+현재 의미:
+- 승률은 표본 수에 따라 50%로 당기는 간단한 shrinkage를 적용한다.
+- 픽률과 밴률은 프리셋 가중치로 반영한다.
+- rawWinRate가 45% 미만이면 추가 패널티를 준다.
+
+문제 가능성:
+- confidence = sample / max(minSample*2, 12)는 임의적이다.
+- 승률 보정이 Beta-binomial, Wilson interval, empirical Bayes가 아니다.
+- 픽률/밴률은 불확실성 보정 없이 그대로 들어간다.
+- 대회와 솔랭의 pickRate/banRate 의미가 다르다.
+- role별 메타 스코어에서 banRate는 role-specific하지 않다.
+- 밴률이 높은데 승률이 낮은 챔피언의 과대평가 위험이 있다.
+- 픽률/밴률과 승률은 서로 독립적이지 않다.
+
+
+4. 현재 메타 티어 계산
+
+4.1 UI 메타 티어
+
+현재 UI의 실제 티어는 buildMetaTierCache()에서 계산한다.
+
+과정:
+1. 모든 챔피언에 대해 displayStatOf()로 현재 scope/patch/role/split의 stat을 만든다.
+2. metaScoreForStat()으로 score를 계산한다.
+3. eligible 챔피언만 남긴다.
+4. 아래 기준으로 정렬한다.
+   - score 내림차순
+   - winRate 내림차순
+   - pickCount 내림차순
+   - championName 가나다/locale 순
+5. 정렬 순위와 score를 같이 보고 티어를 부여한다.
+
+티어 공식:
+
+percentile = (index + 1) / eligibleCount
+
+if score >= 58 and percentile <= 0.08:
+  tier = "OP"
+elif score >= 52 and percentile <= 0.22:
+  tier = "1"
+elif score >= 48 and percentile <= 0.45:
+  tier = "2"
+elif score >= 43 and percentile <= 0.70:
+  tier = "3"
+else:
+  tier = "4"
+
+eligible이 아니면 tier = "-"
+
+의도:
+- 점수 절대값과 상대 순위를 동시에 본다.
+- 특정 패치/scope에서 챔피언 전체가 낮게 나와도 너무 많은 OP가 나오지 않게 한다.
+- 반대로 점수 기준도 있어서 순위만으로 티어가 튀지 않게 한다.
+
+문제 가능성:
+- threshold 58/52/48/43과 percentile 8/22/45/70은 경험적이다.
+- eligibleCount가 적은 역할/지역/패치에서는 percentile cut이 불안정하다.
+- 점수의 불확실성, confidence interval이 티어에 반영되지 않는다.
+- OP/1/2/3/4 티어의 의미가 통계적 확률로 해석되지 않는다.
+
+
+4.2 legacy/generated tier
+
+데이터 생성기에는 아직 calculated_tier()가 남아 있다.
+
+공식:
+
+if pickCount < 5 or winRate is None:
+  tier = "-"
+elif winRate >= 62:
+  tier = "OP"
+elif winRate >= 57:
+  tier = "1"
+elif winRate >= 53:
+  tier = "2"
+elif winRate >= 49:
+  tier = "3"
+else:
+  tier = "4"
+
+주의:
+- 이 legacy tier는 단순 승률 기반이다.
+- 현재 UI에서 보이는 메타 티어는 buildMetaTierCache()의 메타 스코어 기반 티어가 우선이다.
+- 하지만 데이터 payload와 TSV 정책 산출에서 일부 흔적이 남아 있어 혼동/드리프트 가능성이 있다.
+
+
+4.3 정책 TSV 계산
+
+build_meta_data.py에도 policy_meta_score()가 있다.
+
+Python 정책 산식은 UI 메타 스코어와 거의 같은 구조다.
+- sample/minSample 체크
+- confidence = sample / max(minSample * 2, 12)
+- adjustedWinRate = 50 + (rawWinRate - 50) * confidence
+- weighted = adjustedWinRate/pickRate/banRate 가중 평균
+- lowWinPenalty = max(0,45-winRate)*0.8
+- score = clamp(weighted - penalty, 0, 100)
+
+문제:
+- UI JS와 Python 생성기 산식이 중복 구현되어 있다.
+- 앞으로 고도화하면 두 산식이 어긋날 가능성이 있다.
+- 중앙 산식 명세/테스트가 필요하다.
+
+
+5. 현재 꿀챔 점수 계산
+
+5.1 개념
+
+메타 스코어:
+- 챔피언이 순수하게 또는 종합적으로 좋은 정도를 보여주는 주 지표.
+
+꿀챔 점수:
+- 좋은 정도에 비해 픽되거나 밴되는 비율이 낮은 챔피언을 찾는 보조 지표.
+- 즉 "강한데 덜 노출된 챔피언"을 찾는다.
+- 메타 티어를 대체하지 않고, 발굴/추천용 보조 지표다.
+
+
+5.2 현재 꿀챔 산식
+
+먼저 pureStrengthForStat()으로 순수 강도 점수를 계산한다.
+
+if rawWinRate is not finite or sample < minSample:
+  eligible = false
+else:
+  confidence = clamp(sample / max(minSample * 2, 12), 0, 1)
+  adjustedWinRate = 50 + (rawWinRate - 50) * confidence
+  lowWinPenalty = max(0, 45 - rawWinRate) * 0.6
+  strengthScore = clamp(adjustedWinRate - lowWinPenalty, 0, 100)
+
+노출도 exposureRate:
+
+if scope == solo or source contains "solo_rank":
+  exposureRate = pickRate
+else if banPickRate is finite:
+  exposureRate = banPickRate
+else:
+  exposureRate = pickRate + banRate
+
+그 다음 eligible 챔피언들끼리 percentile rank를 계산한다.
+
+strengthRank:
+- strengthScore 오름차순 정렬 후 (index + 1) / count
+- 강할수록 1에 가까움
+
+exposureRank:
+- exposureRate 오름차순 정렬 후 (index + 1) / count
+- 많이 노출될수록 1에 가까움
+
+hiddenGap:
+hiddenGap = max(0, strengthRank - exposureRank)
+
+reliability:
+reliability = sqrt(sample / (sample + minSample * 2))
+
+strongEnough:
+strengthScore >= 50
+
+최종 꿀챔 점수:
+
+if not strongEnough:
+  honeyScore = 0
+else:
+  honeyScore =
+    100
+    * hiddenGap^0.75
+    * strengthRank^1.15
+    * reliability
+
+clamp 0..100, 소수점 1자리.
+
+정렬:
+- honeyScore 내림차순
+- metaScore 내림차순
+- winRate 내림차순
+- pickCount 내림차순
+- name
+
+
+5.3 현재 꿀챔 산식의 의도와 한계
+
+의도:
+- 단순히 winRate 높은 저표본 챔피언이 튀는 것을 reliability로 억제한다.
+- 강하지 않은 챔피언은 꿀챔으로 나오지 않도록 strengthScore >= 50 조건을 둔다.
+- 밴률이 높은 챔피언은 이미 노출된 것으로 보고 꿀챔 점수를 낮춘다.
+- 솔랭은 밴이 없으므로 pickRate만 노출도로 본다.
+
+한계:
+- strengthScore 자체가 단순 승률 shrinkage라 불확실성 모델이 약하다.
+- exposureRate의 source별 보정이 거칠다.
+- 전체 통계에서 대회와 솔랭이 섞이면 exposureRank 해석이 흔들릴 수 있다.
+- hiddenGap = strengthRank - exposureRank가 직관적이지만 통계 모델은 아니다.
+- 노출도가 낮은 이유가 "숨은 꿀픽"이 아니라 특정 상황/역할/선수 능력/카운터픽/지역 메타 때문일 수 있다.
+- 다중 역할 챔피언의 role-specific honey score가 불안정할 수 있다.
+
+
+6. 우리가 달성하고 싶은 고도화 목표
+
+6.1 전체 목표
+
+현재보다 더 통계적으로 신뢰할 수 있고, 역할/지역/패치/대회/솔랭 차이를 안정적으로 반영하는 메타 계산 시스템을 만들고 싶다.
+
+원하는 방향:
+- 수학적으로 더 타당한 승률 보정.
+- 표본 수가 적을 때 과대평가 억제.
+- 역할별 메타 스코어 신뢰도 상승.
+- 티어 경계의 안정성 상승.
+- 꿀챔 점수의 허수/저표본/비노출 오판 감소.
+- UI에서 사용자가 왜 해당 점수/티어인지 이해할 수 있는 breakdown 제공.
+- Python 생성기와 JS UI 계산의 산식 드리프트 방지.
+- 고성능 유지. 로컬 Electron/JS + Python 생성기에서 충분히 빠르게 돌아야 한다.
+
+
+6.2 역할별 메타 스코어 고도화 목표
+
+현재 문제:
+- role별 sample이 작다.
+- role별 banRate가 없다.
+- 챔피언이 여러 역할을 갈 수 있을 때 밴을 특정 역할에 귀속하기 어렵다.
+- role total denominator가 현재 role appearances 기반이다.
+- 역할별 승률은 선수/리그/지역/패치의 영향을 크게 받을 수 있다.
+
+GPT Pro에게 묻고 싶은 것:
+
+1. 역할별 메타 스코어를 더 안정적으로 계산하려면 어떤 모델이 적합한가?
+   예:
+   - Beta-binomial empirical Bayes
+   - Wilson lower/center interval
+   - hierarchical Bayesian shrinkage
+   - champion-role partial pooling
+   - source/region/patch별 partial pooling
+
+2. role별 winRate는 전체 챔피언 winRate와 어떻게 partial pooling해야 하는가?
+   예:
+   - role score = role-specific posterior와 champion global posterior의 가중 평균
+   - role sample이 적으면 global로 수축
+   - role sample이 충분하면 role 값 우선
+
+3. role별 pickRate denominator는 무엇이 가장 타당한가?
+   - role appearances 합
+   - 경기 수 * 2
+   - 경기 수 * 해당 역할 슬롯 수
+   - 대회/솔랭을 따로 계산 후 합성
+
+4. role별 banRate는 어떻게 추정해야 하는가?
+   - 챔피언의 역할 분포에 따라 banCount를 role별로 fractional allocation?
+   - 밴은 역할 중립 지표로 두고 role score에는 제한적으로만 반영?
+   - role-specific exposure에는 pickRate만 쓰고 banRate는 global pressure로 별도 표시?
+
+5. 역할별 메타 스코어에 선수 능력치/지역/리그 수준을 보정해야 하는가?
+   - 1부/2부, 지역, 국제전, 솔랭의 레벨 차이 반영 여부
+   - 하드피어리스/피어리스 룰 차이 반영 방식
+
+
+6.3 메타 티어 신뢰도 상승 목표
+
+현재 문제:
+- score threshold와 percentile threshold가 경험적이다.
+- confidence interval이 없다.
+- 역할/지역/패치처럼 eligibleCount가 작으면 percentile이 불안정하다.
+- 티어가 점수의 불확실성을 반영하지 않는다.
+- OP/1/2/3/4의 의미가 통계적으로 정의되어 있지 않다.
+
+GPT Pro에게 묻고 싶은 것:
+
+1. 메타 티어는 절대 점수 기반, 상대 백분위 기반, posterior probability 기반 중 어떤 방식이 가장 적합한가?
+
+2. 다음 같은 티어 정의가 가능한가?
+   - OP: 해당 챔피언이 상위 8% 또는 강도 기준 S 이상일 posterior probability가 일정 수준 이상
+   - 1티어: 상위 22% probability 또는 expected score 기준
+   - 2/3/4티어도 비슷하게 확률화
+
+3. 불확실성이 큰 챔피언은 어떻게 처리해야 하는가?
+   - 낮은 표본이면 티어를 보수적으로 낮춤
+   - 티어 옆에 confidence 표시
+   - "잠정" 태그 부여
+   - 티어 산정에는 posterior lower bound 사용
+
+4. 현재 메타 스코어가 pickRate/banRate를 포함하는데, 메타 티어도 이 종합 점수로 매기는 것이 타당한가?
+   - 아니면 순수 강도 티어와 메타 압박 티어를 분리해야 하는가?
+   - 예: Strength Tier, Draft Pressure Tier, Overall Meta Tier
+
+5. 대회/솔랭/전체를 같은 티어 산식으로 계산해도 되는가?
+   - source별 가중치 또는 별도 모델이 필요한가?
+
+6. UI에서 직관적이면서도 통계적으로 정직한 티어 표시 방식은 무엇인가?
+   예:
+   - 티어 + 신뢰도
+   - 점수 범위
+   - sample badge
+   - "저표본 주의"
+
+
+6.4 꿀챔 점수 고도화 목표
+
+현재 문제:
+- 꿀챔 점수는 strengthRank - exposureRank 기반의 휴리스틱이다.
+- 낮은 노출도가 정말 "저평가"인지, 아니면 상황 제한/역할 제한/카운터픽/지역 편향 때문인지 구분하지 못한다.
+- 메타 스코어와 꿀챔 점수의 수학적 관계가 아직 정교하지 않다.
+- 전체 통계에서 대회와 솔랭 노출도를 섞는 방식이 조심스럽다.
+
+GPT Pro에게 묻고 싶은 것:
+
+1. 꿀챔 점수를 "강도 대비 노출 부족"으로 정의할 때 가장 타당한 모델은 무엇인가?
+
+가능한 접근:
+- honey = posterior strength - expected exposure model residual
+- exposureExpected = f(strength, role, source, region, patch, ban availability)
+- honey = positive residual where strength is high but actual exposure is lower than expected
+- 신뢰도는 posterior uncertainty로 조절
+
+2. 노출도는 어떻게 계산해야 하는가?
+   - 대회: pickRate + banRate 또는 draft presence
+   - 솔랭: pickRate only
+   - 전체: source별 exposure를 따로 계산 후 source weight로 결합
+   - role별: role pickRate + allocated ban pressure?
+
+3. 꿀챔 점수에서 밴률은 어떻게 다뤄야 하는가?
+   - 밴률이 높은 챔피언은 이미 알려진 픽이므로 꿀챔이 아님
+   - 하지만 밴률이 높은데 픽률이 낮은 챔피언은 "위험픽" 또는 "필밴"으로 따로 분류해야 하는가?
+
+4. 꿀챔 점수의 저표본 방어는 어떤 방식이 좋은가?
+   - Wilson lower bound
+   - Bayesian posterior mean/lower credible bound
+   - minimum effective sample size
+   - uncertainty penalty
+   - time decay와 함께 적용
+
+5. 꿀챔 점수와 메타 티어가 충돌할 때 UI에서 어떻게 보여줘야 하는가?
+   예:
+   - OP인데 꿀챔 낮음: 이미 많이 알려진 강챔
+   - 2티어인데 꿀챔 높음: 저평가 가능성
+   - 승률은 높지만 꿀챔 낮음: 노출이 이미 높거나 표본 불안
+   - 꿀챔 높지만 티어 낮음: 산식 오류 또는 상황 제한 가능성
+
+6. 꿀챔 점수의 "정답 검증"은 어떻게 해야 하는가?
+   - 다음 패치/다음 기간에서 픽률 상승 예측?
+   - 이후 표본에서 승률 유지 여부?
+   - top honey picks의 posterior lift?
+   - cross-validation 가능한지?
+
+
+7. 성능/구현 제약
+
+환경:
+- 로컬 Windows
+- Python 데이터 생성기
+- Electron/JS 대시보드
+- 데이터 규모는 현재 수천 경기, 챔피언 약 60명 수준
+- 향후 증가해도 수만 경기 정도를 예상
+
+필요 조건:
+- 너무 무거운 외부 의존성은 피하고 싶다.
+- 가능하면 Python 표준 라이브러리 + 순수 JS로 구현 가능해야 한다.
+- 복잡한 Bayesian MCMC는 피하고 싶다.
+- closed-form empirical Bayes, Wilson interval, Beta posterior, logistic-like scoring 등 빠른 방식 선호.
+- UI에서 즉시 정렬/필터가 가능해야 하므로 계산량이 낮아야 한다.
+- Python 생성기와 JS UI가 같은 산식을 공유하거나, 최소한 테스트 가능한 단일 명세를 가져야 한다.
+
+
+8. GPT Pro에게 원하는 답변 형식
+
+다음 형식으로 답변해 주세요.
+
+1. 현재 산식의 통계적 문제점 진단
+   - 메타 스코어
+   - 메타 티어
+   - 역할별 통계
+   - 꿀챔 점수
+   - 대회/솔랭 결합
+
+2. 추천하는 새 통계 모델
+   - 고성능/실용형 v1
+   - 더 정교한 v2
+   - 장기적으로 가능한 v3
+
+3. 구체적인 산식 제안
+   - winRate 보정 공식
+   - pickRate/banRate/exposure 보정 공식
+   - role-specific score 공식
+   - metaScore 공식
+   - metaTier 공식
+   - honeyScore 공식
+   - confidence/reliability 공식
+
+4. 데이터 구조 제안
+   - meta-data.js에 추가할 필드
+   - Python 생성기에서 미리 계산할 값
+   - JS에서 실시간 계산할 값
+   - source/patch/region/role별 breakdown 구조
+
+5. UI 표시 제안
+   - 사용자가 이해할 수 있는 breakdown
+   - tooltip 문구
+   - 티어 confidence 표시
+   - 저표본/불확실성 경고 방식
+
+6. 검증 방법
+   - 단위 테스트
+   - golden sample 테스트
+   - 다음 기간 예측 검증
+   - regression test
+   - 이상치 탐지
+
+7. 마이그레이션 계획
+   - 기존 산식과 새 산식을 병렬 표시할지
+   - 점진적 전환 순서
+   - 기존 정책 TSV/애드온과의 호환성 유지 방법
+
+
+9. 특히 답변해 주었으면 하는 핵심 질문
+
+Q1. 현재처럼 adjustedWinRate = 50 + (rawWinRate - 50) * confidence 방식이 충분한가?
+아니라면 Beta-binomial 또는 Wilson 기반으로 어떻게 바꾸는 것이 좋은가?
+
+Q2. 메타 스코어에 pickRate와 banRate를 직접 가중합하는 것이 타당한가?
+아니면 강도 점수와 드래프트 압박 점수를 분리한 뒤 합성해야 하는가?
+
+Q3. 역할별 메타 스코어에서 밴률은 어떻게 처리하는 것이 가장 통계적으로 정직한가?
+
+Q4. 대회와 솔랭을 전체 통계로 합칠 때 어떤 source weighting 또는 normalization이 필요한가?
+
+Q5. 메타 티어는 현재 score threshold + percentile cut 방식보다 어떤 방식이 더 안정적인가?
+
+Q6. 꿀챔 점수는 현재 strengthRank - exposureRank보다 어떤 모델이 더 신뢰도 높은가?
+
+Q7. 현재 규모(챔피언 60명, 경기 수천~수만)에서 실시간 UI 계산까지 감안했을 때 가장 좋은 실용 산식은 무엇인가?
+
+Q8. 구현할 때 Python 생성기와 JS UI의 산식 중복을 어떻게 줄이는 것이 좋은가?
+
+Q9. 향후 패치별 시간 decay, 지역별 메타 차이, 1부/2부 차이, 국제전 차이를 어떤 순서로 모델에 넣는 것이 좋은가?
+
+Q10. 최종적으로 사용자에게 "이 챔피언은 왜 OP/1티어/꿀챔인가"를 설명하기 위한 가장 좋은 breakdown은 무엇인가?
+
+
+10. 내가 원하는 최종 결과물
+
+TFM2.gg의 새 통계 시스템은 다음 상태가 되길 원한다.
+
+- 메타 스코어:
+  - 단순 승률보다 안정적.
+  - 표본 수가 적을 때 과대평가를 막음.
+  - 픽률/밴률을 합리적으로 반영.
+  - 대회/솔랭/지역/역할 차이를 정직하게 처리.
+
+- 메타 티어:
+  - OP/1/2/3/4가 더 믿을 만함.
+  - 저표본 챔피언은 잠정 또는 낮은 confidence로 표시.
+  - 역할별/지역별 필터에서도 덜 흔들림.
+
+- 꿀챔 점수:
+  - 좋은데 덜 알려진 챔피언을 잘 찾음.
+  - 단순 저픽률/저밴률 챔피언이 튀지 않음.
+  - 강한데 이미 필밴인 챔피언은 꿀챔이 아니라 드래프트 압박 챔피언으로 구분.
+
+- 사용자 경험:
+  - 표에서 점수와 티어가 직관적으로 보임.
+  - tooltip이나 상세 화면에서 산식 breakdown을 이해할 수 있음.
+  - "저표본 주의", "역할 표본 부족", "날짜 추정", "솔랭/대회 혼합" 같은 caveat가 명확함.
+
+- 구현:
+  - 빠름.
+  - 유지보수 가능.
+  - Python/JS 산식 드리프트 방지.
+  - 기존 애드온 정책 TSV와 호환 가능.
+
+
+끝.
