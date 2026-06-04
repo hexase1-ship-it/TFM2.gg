@@ -57,6 +57,8 @@ POLICY_TIER_MAP = {"OP": "S", "1": "A", "2": "B", "3": "C", "4": "D", "-": "C"}
 INTERNAL_SCORE_FIELDS = [
     "pickOpportunities",
     "banOpportunities",
+]
+SOURCE_COUNTER_FIELDS = [
     "sourceMatchCounts",
     "sourcePickCounts",
     "sourceBanCounts",
@@ -107,6 +109,11 @@ DEFAULT_SCORE_MODEL_SPEC = {
         "residualDivisor": 20,
         "residualExponent": 0.75,
         "strengthGateExponent": 0.75,
+        "adaptiveResidualMinDivisor": 3,
+        "adaptiveResidualQuantile": 0.75,
+        "adaptiveResidualScale": 1.25,
+        "relativeScoreWeight": 0.65,
+        "relativeMagnitudeWeight": 0.35,
     },
 }
 
@@ -3723,39 +3730,41 @@ def normalize_split_stats_by_patch(champions, split_stats_by_patch, draft_scan):
     }
 
 
-def strip_internal_score_fields_from_stats(stats):
+def strip_internal_score_fields_from_stats(stats, keep_source_counters=False):
     if not isinstance(stats, dict):
         return
+    fields = INTERNAL_SCORE_FIELDS if keep_source_counters else INTERNAL_SCORE_FIELDS + SOURCE_COUNTER_FIELDS
     for row in stats.values():
         if isinstance(row, dict):
-            for field in INTERNAL_SCORE_FIELDS:
+            for field in fields:
                 row.pop(field, None)
 
 
-def strip_internal_score_fields_from_split(split_payload):
+def strip_internal_score_fields_from_split(split_payload, keep_source_counters=False):
     if not isinstance(split_payload, dict):
         return
     for groups in (split_payload.get("stats") or {}).values():
         if isinstance(groups, dict):
             for rows in groups.values():
-                strip_internal_score_fields_from_stats(rows)
+                strip_internal_score_fields_from_stats(rows, keep_source_counters=keep_source_counters)
     for versions in (split_payload.get("statsByPatch") or {}).values():
         if isinstance(versions, dict):
             for groups in versions.values():
                 if isinstance(groups, dict):
                     for rows in groups.values():
-                        strip_internal_score_fields_from_stats(rows)
+                        strip_internal_score_fields_from_stats(rows, keep_source_counters=keep_source_counters)
 
 
-def strip_internal_score_fields_for_payload(*stats_groups, split_payloads=None, stats_by_patch=None):
-    for stats in stats_groups:
-        strip_internal_score_fields_from_stats(stats)
+def strip_internal_score_fields_for_payload(combined_stats, tournament_stats, solo_stats, split_payloads=None, stats_by_patch=None):
+    strip_internal_score_fields_from_stats(combined_stats, keep_source_counters=True)
+    strip_internal_score_fields_from_stats(tournament_stats)
+    strip_internal_score_fields_from_stats(solo_stats)
     for scope_group in (stats_by_patch or {}).values():
         if isinstance(scope_group, dict):
-            for stats in scope_group.values():
-                strip_internal_score_fields_from_stats(stats)
-    for split_payload in split_payloads or []:
-        strip_internal_score_fields_from_split(split_payload)
+            for scope, stats in scope_group.items():
+                strip_internal_score_fields_from_stats(stats, keep_source_counters=(scope == "overall"))
+    for split_payload, keep_source_counters in split_payloads or []:
+        strip_internal_score_fields_from_split(split_payload, keep_source_counters=keep_source_counters)
 
 
 def split_count(split_payload, axis, key):
@@ -4183,7 +4192,11 @@ def main():
         combined_stats,
         tournament_stats,
         solo_stats,
-        split_payloads=[tournament_splits, solo_splits, combined_splits],
+        split_payloads=[
+            (tournament_splits, False),
+            (solo_splits, False),
+            (combined_splits, True),
+        ],
         stats_by_patch=stats_by_patch,
     )
     region_order = {key: index for index, key in enumerate(LEAGUE_KEY_FALLBACKS)}
