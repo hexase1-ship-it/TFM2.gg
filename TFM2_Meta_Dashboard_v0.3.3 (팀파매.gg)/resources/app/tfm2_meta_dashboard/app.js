@@ -65,7 +65,18 @@ const DEFAULT_SCORE_MODEL_SPEC = {
     { tier: "2", minLower: 48, maxPercentile: 0.45 },
     { tier: "3", minLower: 44, maxPercentile: 0.7 },
   ],
-  honey: { strengthGateStart: 50, strengthGateSpan: 15, residualDivisor: 20, residualExponent: 0.75, strengthGateExponent: 0.75 },
+  honey: {
+    strengthGateStart: 50,
+    strengthGateSpan: 15,
+    residualDivisor: 20,
+    residualExponent: 0.75,
+    strengthGateExponent: 0.75,
+    adaptiveResidualMinDivisor: 3,
+    adaptiveResidualQuantile: 0.75,
+    adaptiveResidualScale: 1.25,
+    relativeScoreWeight: 0.65,
+    relativeMagnitudeWeight: 0.35,
+  },
 };
 const scoreModelSpec = DATA.scoreModelSpec || DEFAULT_SCORE_MODEL_SPEC;
 
@@ -366,6 +377,19 @@ function clamp(value, min, max) {
 
 function round1(value) {
   return Math.round(value * 10) / 10;
+}
+
+function quantile(values, q) {
+  const sorted = values
+    .map(Number)
+    .filter(Number.isFinite)
+    .sort((a, b) => a - b);
+  if (!sorted.length) return null;
+  const index = clamp(Number(q ?? 0.5), 0, 1) * (sorted.length - 1);
+  const low = Math.floor(index);
+  const high = Math.ceil(index);
+  if (low === high) return sorted[low];
+  return sorted[low] + (sorted[high] - sorted[low]) * (index - low);
 }
 
 function currentTierPreset() {
@@ -750,6 +774,7 @@ function assignHoneyScores(entries, context, sampleInfo) {
   const slope = varX > 0 ? Math.max(0, covXY / varX) : 0;
   const intercept = meanY - slope * meanX;
   const maxPresence = Math.max(...valid.map((entry) => Number(entry.presence || 0)), context.exposure?.presence || 0.1);
+  const preliminary = [];
   for (const entry of entries) {
     if (!entry.eligible) {
       entry.honey = { eligible: false, score: null, reason: entry.reason || "표본 부족" };
@@ -763,22 +788,78 @@ function assignHoneyScores(entries, context, sampleInfo) {
       1
     );
     const reliability = Math.sqrt(Number(entry.sample || 0) / Math.max(1, Number(entry.sample || 0) + Number(sampleInfo.minSample || 5) * 2));
-    const residualFactor = clamp(residual / Math.max(1, Number(honeySpec.residualDivisor || 20)), 0, 1);
-    const score = 100 *
+    preliminary.push({ entry, expectedPresence, residual, strengthGate, reliability });
+  }
+
+  const baseResidualDivisor = Math.max(1, Number(honeySpec.residualDivisor || 20));
+  const positiveResiduals = preliminary
+    .filter((row) => row.residual > 0 && row.strengthGate > 0)
+    .map((row) => row.residual);
+  const adaptiveResidual = quantile(positiveResiduals, Number(honeySpec.adaptiveResidualQuantile ?? 0.75));
+  const adaptiveResidualDivisor = adaptiveResidual === null
+    ? baseResidualDivisor
+    : clamp(
+        adaptiveResidual * Number(honeySpec.adaptiveResidualScale ?? 1.25),
+        Math.max(1, Number(honeySpec.adaptiveResidualMinDivisor ?? 3)),
+        baseResidualDivisor
+      );
+
+  const scored = [];
+  for (const row of preliminary) {
+    const { entry, expectedPresence, residual, strengthGate, reliability } = row;
+    const residualFactor = clamp(residual / adaptiveResidualDivisor, 0, 1);
+    const rawScore = 100 *
       Math.pow(residualFactor, Number(honeySpec.residualExponent || 0.75)) *
       Math.pow(strengthGate, Number(honeySpec.strengthGateExponent || 0.75)) *
       reliability;
+    const clampedRawScore = clamp(rawScore, 0, 100);
+    scored.push({ entry, rawScore: clampedRawScore });
     entry.honey = {
       eligible: true,
-      score: round1(clamp(score, 0, 100)),
+      score: round1(clampedRawScore),
+      rawScore: round1(clampedRawScore),
       strengthScore: entry.strengthScore,
       exposureRate: entry.presence,
       expectedExposure: round1(expectedPresence),
       hiddenGap: round1(residual),
       reliability: round1(reliability * 100),
+      strengthGate: round1(strengthGate * 100),
+      residualFactor: round1(residualFactor * 100),
+      residualDivisor: round1(adaptiveResidualDivisor),
       sample: entry.sample,
       minSample: entry.minSample,
     };
+  }
+
+  const positiveScores = scored
+    .map((row) => row.rawScore)
+    .filter((score) => Number.isFinite(score) && score > 0)
+    .sort((a, b) => a - b);
+  const maxRawScore = positiveScores.length ? positiveScores[positiveScores.length - 1] : 0;
+  const relativeWeight = clamp(Number(honeySpec.relativeScoreWeight ?? 0.65), 0, 1);
+  const magnitudeWeight = clamp(Number(honeySpec.relativeMagnitudeWeight ?? 0.35), 0, 1);
+  const weightTotal = Math.max(0.001, relativeWeight + magnitudeWeight);
+  for (const row of scored) {
+    const { entry, rawScore } = row;
+    if (!(rawScore > 0) || positiveScores.length < 2 || !(maxRawScore > 0)) {
+      entry.honey.scoreMode = "raw";
+      entry.honey.positiveCount = positiveScores.length;
+      continue;
+    }
+    const lowerCount = positiveScores.filter((score) => score < rawScore).length;
+    const equalCount = positiveScores.filter((score) => score === rawScore).length;
+    const percentile = positiveScores.length > 1
+      ? (lowerCount + Math.max(0, equalCount - 1) / 2) / (positiveScores.length - 1)
+      : 1;
+    const magnitude = rawScore / maxRawScore;
+    const relativeScore = 100 * (
+      (relativeWeight / weightTotal) * percentile +
+      (magnitudeWeight / weightTotal) * magnitude
+    );
+    entry.honey.score = round1(clamp(relativeScore, rawScore, 100));
+    entry.honey.relativePercentile = round1(percentile * 100);
+    entry.honey.scoreMode = "relative";
+    entry.honey.positiveCount = positiveScores.length;
   }
 }
 
@@ -833,11 +914,16 @@ function honeyScoreTitle(info) {
   }
   return [
     `꿀챔 점수 ${honeyScoreLabel(info)}`,
+    `원점수 ${info.rawScore ?? "-"}`,
+    `보정 방식 ${info.scoreMode === "relative" ? "필터 내 상대 보정" : "원점수"}`,
     `순수 강도 ${info.strengthScore?.toFixed?.(1) ?? "-"}`,
     `노출도 ${round1(info.exposureRate || 0)}%`,
     `기대 노출도 ${info.expectedExposure ?? "-"}%`,
     `숨은 정도 ${info.hiddenGap ?? 0}%`,
+    `강도 게이트 ${info.strengthGate ?? 0}%`,
+    `잔차 배율 ${info.residualFactor ?? 0}%`,
     `신뢰도 ${info.reliability ?? 0}%`,
+    `양수 후보 ${info.positiveCount ?? 0}`,
     `표본 ${info.sample}/${info.minSample}`,
   ].join(" · ");
 }

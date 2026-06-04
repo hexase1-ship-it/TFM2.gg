@@ -52,6 +52,11 @@
     "strengthGateSpan": 15,
     "residualDivisor": 20,
     "residualExponent": 0.75,
-    "strengthGateExponent": 0.75
+    "strengthGateExponent": 0.75,
+    "adaptiveResidualMinDivisor": 3,
+    "adaptiveResidualQuantile": 0.75,
+    "adaptiveResidualScale": 1.25,
+    "relativeScoreWeight": 0.65,
+    "relativeMagnitudeWeight": 0.35
   }
 }
