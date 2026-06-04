@@ -1,0 +1,20 @@
+{
+  "author": "KMK",
+  "dependencies": [
+    {
+      "mod_id": "base",
+      "version": ">=0.4.9"
+    }
+  ],
+  "description": "Adds dashboard-derived champion meta scores to native AI ban/pick scoring.",
+  "last_updated": "2026-06-04",
+  "mod_id": "tfm2_ai_banpick_probe",
+  "name": "TFM2 AI Banpick Policy",
+  "tags": [
+    "AI",
+    "Banpick",
+    "Draft",
+    "Meta"
+  ],
+  "version": "0.2.9"
+}

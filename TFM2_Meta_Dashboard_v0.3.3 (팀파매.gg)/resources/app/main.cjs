@@ -15,7 +15,7 @@ const RELEASE_API = `https://api.github.com/repos/${REPO_FULL_NAME}/releases/lat
 const LATEST_TAG_REF_API = `https://api.github.com/repos/${REPO_FULL_NAME}/git/ref/tags/latest`;
 const RELEASE_ASSET_NAME = "TFM2.gg_Distribution.zip";
 const UPDATE_INFO_ASSET_NAME = "TFM2.gg_UpdateInfo.json";
-const PACKAGE_LAYOUT_VERSION = 2;
+const PACKAGE_LAYOUT_VERSION = 3;
 
 let mainWindow = null;
 let dashboardDir = null;

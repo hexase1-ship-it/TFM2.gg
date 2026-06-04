@@ -1,0 +1,20 @@
+{
+  "author": "KMK",
+  "dependencies": [
+    {
+      "mod_id": "base",
+      "version": ">=0.4.9"
+    }
+  ],
+  "description": "Applies TeamParmae.gg overall-derived champion tiers to in-game team champion tier data.",
+  "last_updated": "2026-06-04",
+  "mod_id": "tfm2_meta_champion_tiers",
+  "name": "TFM2 Meta Champion Tiers",
+  "tags": [
+    "Meta",
+    "Champion",
+    "Tier",
+    "TeamParmae"
+  ],
+  "version": "0.1.4"
+}

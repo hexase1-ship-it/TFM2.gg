@@ -1781,7 +1781,7 @@ function renderChampionMetricRow(stat) {
   const games = Number(stat.pickCount || 0);
   const tierInfo = metaTierInfo(stat);
   return `<div class="metric-row">
-    <div class="metric"><span>종합점수</span><strong title="${scoreTitle(tierInfo)}">${scoreLabel(tierInfo)}</strong></div>
+    <div class="metric"><span>메타 스코어</span><strong title="${scoreTitle(tierInfo)}">${scoreLabel(tierInfo)}</strong></div>
     <div class="metric"><span>승률</span><strong>${pct(stat.winRate)}</strong></div>
     <div class="metric"><span>승/패</span><strong>${fmt(stat.wins)} / ${fmt(stat.losses)}</strong></div>
     <div class="metric"><span>K/D/A</span><strong>${fmt(stat.kills)} / ${fmt(stat.deaths)} / ${fmt(stat.assists)}</strong></div>
