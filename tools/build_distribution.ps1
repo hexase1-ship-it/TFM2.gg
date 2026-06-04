@@ -48,6 +48,26 @@ function Copy-CleanDirectory {
     Copy-Item -LiteralPath $Source -Destination $Destination -Recurse -Force
 }
 
+function Compress-ArchiveWithRetry {
+    param(
+        [string]$Source,
+        [string]$Destination,
+        [int]$Attempts = 5
+    )
+
+    for ($attempt = 1; $attempt -le $Attempts; $attempt++) {
+        try {
+            Compress-Archive -LiteralPath $Source -DestinationPath $Destination -Force
+            return
+        } catch {
+            if ($attempt -eq $Attempts) {
+                throw
+            }
+            Start-Sleep -Seconds ([Math]::Min(2 * $attempt, 8))
+        }
+    }
+}
+
 function Get-DirectoryContentHash {
     param(
         [string]$Path
@@ -198,12 +218,16 @@ $payloadRoot = Join-Path $packageRoot "payload"
 $installerSrc = Join-Path $repoRoot "installer\tfm2gg_installer.py"
 $dashboardProject = Resolve-ProjectDirectory -Root $repoRoot -Prefix "TFM2_Meta_Dashboard_v0.3.3"
 $modSrc = Resolve-ProjectDirectory -Root $repoRoot -Prefix "tfm2_meta_item_delegate "
+$metaTierModSrc = Resolve-ProjectDirectory -Root $repoRoot -Prefix "tfm2_meta_champion_tiers "
+$aiBanpickModSrc = Resolve-ProjectDirectory -Root $repoRoot -Prefix "tfm2_ai_banpick_probe "
 $dashboardSrc = Join-Path $dashboardProject "resources\app"
 $readmeSrc = Join-Path $repoRoot "README.md"
 
 Assert-PathExists -Path $installerSrc -Label "Installer source"
 Assert-PathExists -Path $dashboardSrc -Label "Dashboard payload"
 Assert-PathExists -Path $modSrc -Label "Addon payload"
+Assert-PathExists -Path $metaTierModSrc -Label "Meta tier addon payload"
+Assert-PathExists -Path $aiBanpickModSrc -Label "AI banpick addon payload"
 Assert-PathExists -Path $readmeSrc -Label "README"
 
 if (-not (Test-Path -LiteralPath $outRoot)) {
@@ -257,6 +281,8 @@ $dashboardShellDest = Join-Path $payloadRoot "dashboard_shell"
 Copy-DashboardShell -DashboardProject $dashboardProject -Destination $dashboardShellDest -CacheDirectory $outRoot
 New-Item -ItemType Directory -Path (Join-Path $payloadRoot "mods") -Force | Out-Null
 Copy-CleanDirectory -Source $modSrc -Destination (Join-Path $payloadRoot "mods\tfm2_meta_item_delegate")
+Copy-CleanDirectory -Source $metaTierModSrc -Destination (Join-Path $payloadRoot "mods\tfm2_meta_champion_tiers")
+Copy-CleanDirectory -Source $aiBanpickModSrc -Destination (Join-Path $payloadRoot "mods\tfm2_ai_banpick_probe")
 
 Get-ChildItem -LiteralPath $packageRoot -Recurse -File -Force |
     Where-Object {
@@ -269,7 +295,11 @@ Get-ChildItem -LiteralPath $packageRoot -Recurse -File -Force |
 $dashboardFileCount = (Get-ChildItem -LiteralPath (Join-Path $payloadRoot "dashboard_app") -Recurse -File | Measure-Object).Count
 $dashboardShellFileCount = (Get-ChildItem -LiteralPath (Join-Path $payloadRoot "dashboard_shell") -Recurse -File | Measure-Object).Count
 $dashboardShellExe = Join-Path $payloadRoot "dashboard_shell\TFM2MetaDashboard.exe"
-$modDll = Join-Path $payloadRoot "mods\tfm2_meta_item_delegate\tfm2_meta_item_delegate.dll"
+$modDlls = @(
+    (Join-Path $payloadRoot "mods\tfm2_meta_item_delegate\tfm2_meta_item_delegate.dll"),
+    (Join-Path $payloadRoot "mods\tfm2_meta_champion_tiers\tfm2_meta_champion_tiers.dll"),
+    (Join-Path $payloadRoot "mods\tfm2_ai_banpick_probe\tfm2_ai_banpick_probe.dll")
+)
 if ($dashboardFileCount -lt 10) {
     throw "Dashboard payload looks incomplete. File count: $dashboardFileCount"
 }
@@ -277,7 +307,9 @@ if ($dashboardShellFileCount -lt 10) {
     throw "Dashboard shell payload looks incomplete. File count: $dashboardShellFileCount"
 }
 Assert-PathExists -Path $dashboardShellExe -Label "Dashboard shell executable"
-Assert-PathExists -Path $modDll -Label "Addon DLL"
+foreach ($modDll in $modDlls) {
+    Assert-PathExists -Path $modDll -Label "Addon DLL"
+}
 $dashboardRevision = Get-DirectoryContentHash -Path $dashboardDest
 
 $sha = ""
@@ -300,15 +332,20 @@ $manifest = [ordered]@{
     packageVersion = $version
     sourceRevision = $fullSha
     dashboardRevision = $dashboardRevision
-    packageLayoutVersion = 2
+    packageLayoutVersion = 3
     dashboardInstallDir = "TFM2.gg"
     targetGameVersion = "0.4.9"
     repository = "hexase1-ship-it/TFM2.gg"
     releaseAsset = "TFM2.gg_Distribution.zip"
     expectedGameFiles = [ordered]@{
-        "TeamfightManager2.exe" = 63971328
+        "TeamfightManager2.exe" = 63962624
         "bundle.game_data" = 1119929218
     }
+    addons = @(
+        [ordered]@{ modId = "tfm2_meta_item_delegate"; label = "Meta Item Delegate"; required = $true },
+        [ordered]@{ modId = "tfm2_meta_champion_tiers"; label = "Meta Champion Tiers"; required = $false },
+        [ordered]@{ modId = "tfm2_ai_banpick_probe"; label = "AI Banpick Policy"; required = $false }
+    )
     generatedAt = (Get-Date).ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ssZ")
 }
 $manifestJson = $manifest | ConvertTo-Json -Depth 8
@@ -323,7 +360,7 @@ $updateInfo = [ordered]@{
     packageVersion = $version
     sourceRevision = $fullSha
     dashboardRevision = $dashboardRevision
-    packageLayoutVersion = 2
+    packageLayoutVersion = 3
     targetGameVersion = "0.4.9"
     repository = "hexase1-ship-it/TFM2.gg"
     releaseAsset = "TFM2.gg_Distribution.zip"
@@ -337,7 +374,7 @@ $zipPath = Join-Path $outRoot "TFM2.gg_Distribution.zip"
 if (Test-Path -LiteralPath $zipPath) {
     Remove-Item -LiteralPath $zipPath -Force
 }
-Compress-Archive -LiteralPath $packageRoot -DestinationPath $zipPath -Force
+Compress-ArchiveWithRetry -Source $packageRoot -Destination $zipPath
 
 $zipInfo = Get-Item -LiteralPath $zipPath
 Write-Host "Distribution package: $packageRoot"

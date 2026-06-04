@@ -1,0 +1,71 @@
+# AUTO_GENERATED_BY_TFM2_META_DASHBOARD
+# Do not hand-edit unless you intentionally want to override dashboard meta scoring.
+# Generated: 2026-06-04T21:44:16
+# Save: C:\Users\hexas\AppData\Roaming\TeamSamoyed\TeamfightManager2\data\save_20260603_054305.data
+# Source: overall patch 2026.3.0
+# Patch: 2026.3.0
+# Preset: classic weights={"ban": 0.2, "pick": 0.2, "win": 1.0}
+# Sample: normal min=10 reason=9 days since patch
+# Format: champion_id<TAB>tier<TAB>overall
+# Non-eligible or low-sample champions are emitted as neutral C/50.0 so native AI keeps its base score.
+# champion_id	tier	overall
+swordman	B	49.4
+guardian_spirit	B	48.6
+siege_breaker	B	48.0
+executioner	C	46.9
+inquisitor	C	46.1
+barrier_magician	C	45.3
+fighter	C	45.3
+dancer	C	44.8
+gunner	C	44.7
+priest	C	44.0
+soldier	C	43.6
+ice_mage	C	43.5
+dokkaebi	C	43.2
+berserker	D	42.9
+jiangshi	D	42.8
+bard	D	41.6
+shadowmancer	D	41.3
+spirit_caller	D	41.1
+magic_knight	D	41.0
+pythoness	D	40.8
+lightning_mage	D	40.7
+druid	D	40.3
+ghost	D	40.0
+boomerang_hunter	D	38.2
+demon	D	37.5
+plague_doctor	D	37.0
+illusionist	D	36.4
+whip_master	D	36.2
+knight	D	35.1
+prisoner	D	32.8
+pole_warrior	D	32.2
+ogre	D	24.5
+hammerer	D	14.1
+hitman	C	50.0
+vampire	C	50.0
+dark_mage	C	50.0
+pyromancer	C	50.0
+bomber	C	50.0
+lancer	C	50.0
+enchanter	C	50.0
+chef	C	50.0
+exorcist	C	50.0
+android	C	50.0
+hunter	C	50.0
+voodoo_shaman	C	50.0
+white_mage	C	50.0
+shield_bearer	C	50.0
+wind_mage	C	50.0
+monk	C	50.0
+dual_blader	C	50.0
+poison_dart_hunter	C	50.0
+taoist	C	50.0
+gambler	C	50.0
+ninja	C	50.0
+werewolf	C	50.0
+necromancer	C	50.0
+cavalry_knight	C	50.0
+archer	C	50.0
+clown	C	50.0
+circus_blade	C	50.0

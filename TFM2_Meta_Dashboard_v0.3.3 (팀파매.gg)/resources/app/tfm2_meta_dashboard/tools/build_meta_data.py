@@ -16,6 +16,11 @@ OUT = DASHBOARD / "data" / "meta-data.js"
 CORE_ITEM_BUILDS_OUT = DASHBOARD / "data" / "core-item-builds.json"
 CORE_ITEM_BUILDS_MOD_OUT = ROOT / "mods" / "tfm2_meta_item_delegate" / "core-item-builds.json"
 CORE_ITEM_BUILDS_MOD_DATA_OUT = ROOT / "mods" / "tfm2_meta_item_delegate" / "data" / "core-item-builds.json"
+POLICY_EXPORT_DIR = DASHBOARD / "data" / "policy_exports"
+CHAMPION_TIER_POLICY_OUT = POLICY_EXPORT_DIR / "champion_tier_policy.tsv"
+AI_CHAMPION_POLICY_OUT = POLICY_EXPORT_DIR / "ai_champion_policy.tsv"
+CHAMPION_TIER_POLICY_MOD_OUT = ROOT / "mods" / "tfm2_meta_champion_tiers" / "champion_tier_policy.tsv"
+AI_CHAMPION_POLICY_MOD_OUT = ROOT / "mods" / "tfm2_ai_banpick_probe" / "ai_champion_policy.tsv"
 BANPICK_DATA = DASHBOARD / "data" / "banpick-data.js"
 ITEM_SETTING_PATHS = [
     DASHBOARD / "data" / "item_setting.item_setting",
@@ -42,6 +47,12 @@ LEAGUE_REGION_LABELS = {
     "tacj": "일본",
 }
 LEAGUE_KEY_FALLBACKS = ["tack", "tacc", "tace", "taca", "tacs", "tacj"]
+POLICY_PRESETS = {
+    "classic": {"label": "classic", "weights": {"win": 1.0, "pick": 0.2, "ban": 0.2}},
+    "fearless": {"label": "fearless", "weights": {"win": 1.0, "pick": 0.18, "ban": 0.55}},
+    "hardFearless": {"label": "hardFearless", "weights": {"win": 1.0, "pick": 0.15, "ban": 0.85}},
+}
+POLICY_TIER_MAP = {"OP": "S", "1": "A", "2": "B", "3": "C", "4": "D", "-": "C"}
 
 
 def version_sort_key(version):
@@ -400,6 +411,277 @@ def write_core_item_builds(core_item_builds):
         path.write_text(text, encoding="utf-8")
         written.append(path)
     return written
+
+
+def clamp_value(value, min_value, max_value):
+    return min(max_value, max(min_value, value))
+
+
+def round1(value):
+    return round(value * 10) / 10
+
+
+def policy_preset():
+    preset_id = os.environ.get("TFM2_POLICY_PRESET", "classic").strip() or "classic"
+    return POLICY_PRESETS.get(preset_id, POLICY_PRESETS["classic"])
+
+
+def policy_sample_volume(stats):
+    rows = list((stats or {}).values())
+    total_matches = max((row.get("totalMatch") or 0 for row in rows), default=0)
+    total_picks = sum(row.get("pickCount") or 0 for row in rows)
+    estimated_matches = total_picks / 10 if total_picks else 0
+    return max(total_matches, estimated_matches)
+
+
+def effective_policy_sample_info(stats, replay_date_status):
+    explicit_min = os.environ.get("TFM2_POLICY_MIN_SAMPLE")
+    if explicit_min and explicit_min.strip().isdigit():
+        min_sample = max(1, int(explicit_min.strip()))
+        return {"minSample": min_sample, "mode": "custom", "reason": "TFM2_POLICY_MIN_SAMPLE"}
+
+    mode = os.environ.get("TFM2_POLICY_SAMPLE_MODE", "auto").strip()
+    if mode == "early":
+        return {"minSample": 5, "mode": "early", "reason": "manual"}
+    if mode == "normal":
+        return {"minSample": 10, "mode": "normal", "reason": "manual"}
+
+    days = replay_date_status.get("daysSincePatch") if isinstance(replay_date_status, dict) else None
+    try:
+        days = None if days is None else float(days)
+    except (TypeError, ValueError):
+        days = None
+    if days is not None and math.isfinite(days):
+        return (
+            {"minSample": 10, "mode": "normal", "reason": f"{days:g} days since patch"}
+            if days >= 3
+            else {"minSample": 5, "mode": "early", "reason": f"{days:g} days since patch"}
+        )
+
+    match_count = policy_sample_volume(stats)
+    return (
+        {"minSample": 10, "mode": "normal", "reason": f"{match_count:g} matches"}
+        if match_count >= 100
+        else {"minSample": 5, "mode": "early", "reason": f"{match_count:g} matches"}
+    )
+
+
+def policy_meta_score(stat, sample_info, preset):
+    sample = int(stat.get("pickCount") or 0)
+    min_sample = int(sample_info.get("minSample") or 5)
+    try:
+        raw_win_rate = float(stat.get("winRate"))
+    except (TypeError, ValueError):
+        raw_win_rate = math.nan
+    if not math.isfinite(raw_win_rate) or sample < min_sample:
+        reason = "missing win rate" if not math.isfinite(raw_win_rate) else f"sample {sample}/{min_sample}"
+        return {
+            "eligible": False,
+            "tier": "-",
+            "score": None,
+            "policyTier": "C",
+            "policyOverall": 50.0,
+            "sample": sample,
+            "minSample": min_sample,
+            "reason": reason,
+        }
+
+    weights = preset["weights"]
+    pick_rate = clamp_value(float(stat.get("pickRate") or 0), 0, 100)
+    ban_rate = clamp_value(float(stat.get("banRate") or 0), 0, 100)
+    confidence = clamp_value(sample / max(min_sample * 2, 12), 0, 1)
+    adjusted_win_rate = round1(50 + (raw_win_rate - 50) * confidence)
+    total_weight = weights["win"] + weights["pick"] + weights["ban"]
+    weighted = (
+        adjusted_win_rate * weights["win"]
+        + pick_rate * weights["pick"]
+        + ban_rate * weights["ban"]
+    ) / max(0.01, total_weight)
+    low_win_penalty = max(0, 45 - raw_win_rate) * 0.8
+    score = round1(clamp_value(weighted - low_win_penalty, 0, 100))
+    return {
+        "eligible": True,
+        "tier": "4",
+        "score": score,
+        "policyTier": "D",
+        "policyOverall": score,
+        "sample": sample,
+        "minSample": min_sample,
+        "winRate": raw_win_rate,
+        "adjustedWinRate": adjusted_win_rate,
+        "pickRate": pick_rate,
+        "banRate": ban_rate,
+        "lowWinPenalty": round1(low_win_penalty),
+    }
+
+
+def meta_tier_for_policy_rank(entry, index, total):
+    if not entry.get("eligible") or entry.get("score") is None or not total:
+        return "-"
+    percentile = (index + 1) / total
+    score = entry["score"]
+    if score >= 58 and percentile <= 0.08:
+        return "OP"
+    if score >= 52 and percentile <= 0.22:
+        return "1"
+    if score >= 48 and percentile <= 0.45:
+        return "2"
+    if score >= 43 and percentile <= 0.7:
+        return "3"
+    return "4"
+
+
+def select_policy_stats(combined_stats, stats_by_patch, patch_versions):
+    requested = os.environ.get("TFM2_POLICY_PATCH", "latest").strip()
+    if requested in {"", "latest"}:
+        patch = patch_versions[-1] if patch_versions else "all"
+    else:
+        patch = requested
+    if patch != "all":
+        rows = (stats_by_patch.get(patch, {}) or {}).get("overall")
+        if rows:
+            return rows, patch, f"overall patch {patch}"
+    return combined_stats, "all", "overall all patches"
+
+
+def build_policy_exports(champions, stats, generated_at, save_path, patch_key, source_label, replay_date_status):
+    preset = policy_preset()
+    sample_info = effective_policy_sample_info(stats, replay_date_status)
+    entries = []
+    for champ in champions:
+        champion_id = champ["id"]
+        stat = stats.get(champion_id, {})
+        info = policy_meta_score(stat, sample_info, preset)
+        entry = {
+            "championId": champion_id,
+            "championName": champ.get("name") or champion_id,
+            "pickCount": int(stat.get("pickCount") or 0),
+            "winRate": stat.get("winRate"),
+            **info,
+        }
+        entries.append(entry)
+
+    eligible = sorted(
+        [entry for entry in entries if entry["eligible"]],
+        key=lambda entry: (
+            float(entry.get("score") or -1),
+            float(entry.get("winRate") or -1),
+            int(entry.get("pickCount") or 0),
+            str(entry.get("championName") or ""),
+        ),
+        reverse=True,
+    )
+    for index, entry in enumerate(eligible):
+        meta_tier = meta_tier_for_policy_rank(entry, index, len(eligible))
+        entry["tier"] = meta_tier
+        entry["policyTier"] = POLICY_TIER_MAP.get(meta_tier, "C")
+        entry["rank"] = index + 1
+        entry["eligibleCount"] = len(eligible)
+
+    rows = []
+    for entry in entries:
+        overall = entry["policyOverall"] if entry["eligible"] else 50.0
+        rows.append(
+            {
+                "championId": entry["championId"],
+                "championName": entry["championName"],
+                "tier": entry["policyTier"],
+                "overall": round1(overall),
+                "eligible": entry["eligible"],
+                "metaTier": entry.get("tier") or "-",
+                "score": entry.get("score"),
+                "pickCount": entry.get("pickCount"),
+                "winRate": entry.get("winRate"),
+                "reason": entry.get("reason"),
+            }
+        )
+    rows.sort(
+        key=lambda row: (
+            row["eligible"],
+            row["overall"],
+            {"S": 5, "A": 4, "B": 3, "C": 2, "D": 1}.get(row["tier"], 0),
+            str(row["championName"]),
+        ),
+        reverse=True,
+    )
+    metadata = {
+        "generatedAt": generated_at,
+        "save": str(save_path) if save_path else None,
+        "source": source_label,
+        "patch": patch_key,
+        "scope": "overall",
+        "role": "all",
+        "preset": preset["label"],
+        "weights": preset["weights"],
+        "sample": sample_info,
+        "eligibleCount": len(eligible),
+        "rowCount": len(rows),
+    }
+    return {"metadata": metadata, "rows": rows}
+
+
+def render_policy_tsv(policy):
+    meta = policy["metadata"]
+    lines = [
+        "# AUTO_GENERATED_BY_TFM2_META_DASHBOARD",
+        "# Do not hand-edit unless you intentionally want to override dashboard meta scoring.",
+        f"# Generated: {meta['generatedAt']}",
+        f"# Save: {meta.get('save') or ''}",
+        f"# Source: {meta.get('source')}",
+        f"# Patch: {meta.get('patch')}",
+        f"# Preset: {meta.get('preset')} weights={json.dumps(meta.get('weights'), sort_keys=True)}",
+        f"# Sample: {meta.get('sample', {}).get('mode')} min={meta.get('sample', {}).get('minSample')} reason={meta.get('sample', {}).get('reason')}",
+        "# Format: champion_id<TAB>tier<TAB>overall",
+        "# Non-eligible or low-sample champions are emitted as neutral C/50.0 so native AI keeps its base score.",
+        "# champion_id\ttier\toverall",
+    ]
+    for row in policy["rows"]:
+        lines.append(f"{row['championId']}\t{row['tier']}\t{row['overall']:.1f}")
+    return "\n".join(lines) + "\n"
+
+
+def write_policy_file(text, paths, optional_paths=None):
+    written = []
+    skipped = []
+    for path in unique_paths(paths):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text, encoding="utf-8")
+        written.append(path)
+    for path in unique_paths(optional_paths or []):
+        if not path.parent.exists():
+            skipped.append({"path": str(path), "reason": "parent missing"})
+            continue
+        try:
+            path.write_text(text, encoding="utf-8")
+            written.append(path)
+        except OSError as exc:
+            skipped.append({"path": str(path), "reason": str(exc)})
+    return written, skipped
+
+
+def write_policy_exports(policy):
+    tier_text = render_policy_tsv(policy)
+    ai_text = render_policy_tsv(policy)
+    tier_written, tier_skipped = write_policy_file(
+        tier_text,
+        [CHAMPION_TIER_POLICY_OUT],
+        [CHAMPION_TIER_POLICY_MOD_OUT],
+    )
+    ai_written, ai_skipped = write_policy_file(
+        ai_text,
+        [AI_CHAMPION_POLICY_OUT],
+        [AI_CHAMPION_POLICY_MOD_OUT],
+    )
+    return {
+        "championTierPolicy": {
+            "written": [str(path) for path in tier_written],
+            "skipped": tier_skipped,
+        },
+        "aiChampionPolicy": {
+            "written": [str(path) for path in ai_written],
+            "skipped": ai_skipped,
+        },
+    }
 
 
 def unique_paths(paths):
@@ -3316,6 +3598,17 @@ def main():
 
     generated_at = datetime.now().isoformat(timespec="seconds")
     core_item_builds = build_core_item_builds(full_match_analysis, generated_at, save_path, patch_versions, item_catalog)
+    policy_stats, policy_patch, policy_source = select_policy_stats(combined_stats, stats_by_patch, patch_versions)
+    policy_exports = build_policy_exports(
+        champions,
+        policy_stats,
+        generated_at,
+        save_path,
+        policy_patch,
+        policy_source,
+        replay_date_status,
+    )
+    policy_export_status = write_policy_exports(policy_exports)
     region_order = {key: index for index, key in enumerate(LEAGUE_KEY_FALLBACKS)}
     league_meta_list = sorted(
         league_meta.values(),
@@ -3380,6 +3673,8 @@ def main():
             "coreItemBuilds": str(CORE_ITEM_BUILDS_OUT),
             "coreItemBuildsMod": str(CORE_ITEM_BUILDS_MOD_OUT),
             "coreItemBuildsTournamentMatches": core_item_builds["sources"]["tournamentMatches"],
+            "policyExports": policy_export_status,
+            "policyExportSource": policy_exports["metadata"],
             "leagueSplitMatches": tournament_splits["counts"].get("league", {}),
             "soloRegionMatches": solo_splits["counts"].get("region", {}),
         },
@@ -3438,6 +3733,11 @@ def main():
     print(f"Wrote {OUT}")
     for path in core_item_build_paths:
         print(f"Wrote {path}")
+    for group in policy_export_status.values():
+        for path in group.get("written", []):
+            print(f"Wrote {path}")
+        for skipped in group.get("skipped", []):
+            print(f"Skipped policy mirror {skipped.get('path')}: {skipped.get('reason')}")
     print(
         f"champions={len(champions)} news_stats={len(news_rows)} tournament_matches={tournament_relationships.get('groups', 0)} solo_matches={solo_relationships.get('groups', 0)} exporter={bool(exported) and meta_export_status['usable']}"
     )

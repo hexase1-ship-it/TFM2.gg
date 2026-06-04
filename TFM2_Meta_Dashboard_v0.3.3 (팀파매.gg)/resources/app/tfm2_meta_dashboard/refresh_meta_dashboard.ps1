@@ -18,6 +18,26 @@ $logPath = Join-Path $scriptDir "_last_refresh_log.txt"
 $script:SaveProbeExportDir = $null
 $script:SaveProbeFallbackSavePath = $null
 
+function Resolve-TFM2GameRoot {
+    if ($env:TFM2_GAME_ROOT -and (Test-Path -LiteralPath (Join-Path $env:TFM2_GAME_ROOT "TeamfightManager2.exe") -PathType Leaf)) {
+        return $env:TFM2_GAME_ROOT
+    }
+
+    $cursor = Get-Item -LiteralPath $scriptDir
+    while ($cursor) {
+        if (Test-Path -LiteralPath (Join-Path $cursor.FullName "TeamfightManager2.exe") -PathType Leaf) {
+            return $cursor.FullName
+        }
+        $cursor = $cursor.Parent
+    }
+    return $null
+}
+
+$resolvedGameRoot = Resolve-TFM2GameRoot
+if ($resolvedGameRoot) {
+    $env:TFM2_GAME_ROOT = $resolvedGameRoot
+}
+
 function Write-FailAndExit($message, $exitCode = 1) {
     Write-Host ""
     Write-Host $message -ForegroundColor Red
@@ -474,6 +494,7 @@ $header = @(
     "TFM2 Meta Dashboard refresh log",
     "Time: $(Get-Date -Format s)",
     "Script: $scriptDir",
+    "Game root: $env:TFM2_GAME_ROOT",
     "Python: $runner $($runnerArgs -join ' ')",
     "Python probe:",
     ($pythonProbeLog -join [Environment]::NewLine),

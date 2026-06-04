@@ -14,9 +14,9 @@ The mod does not change item stats, champion stats, prices, match rules, or bala
 
 ## How It Runs
 
-- Version 0.2.4 is rebuilt with the Teamfight Manager 2 0.4.9 SDK.
+- Version 0.2.5 is rebuilt with the Teamfight Manager 2 0.4.9 SDK.
 - The mod uses a client-side `InGame` extension and does not register the older server tick hooks that could crash on save load after ABI changes.
-- The parsed meta data is cached and only reloaded when the file path or modified time changes.
+- The parsed meta data is cached and only reloaded when the file path, modified time, or file size changes.
 - It updates the current player team's `champion_personal_tactics` map only when a champion's saved item directions differ from the meta file.
 - Because the game already uses that map when it opens the post-ban/pick personal item screen, the selected champions should appear with their meta item directions automatically.
 - Manual item changes may be overwritten again on later sets if the dashboard meta data still recommends a different direction.
@@ -44,8 +44,35 @@ AD, Magic, AttackSpeed, MagicResistance, Hp, Auto
 
 Teamfight Manager 2 0.4.9 exposes no separate armor/defense item override enum, so dashboard `Defense` directions are mapped to `Hp`.
 
+If `directions` is missing, the mod can fall back to numeric `itemIds`:
+
+```text
+0-4   => AD
+5-9   => AttackSpeed
+10-14 => Hp
+15-19 => MagicResistance
+20-24 => Magic
+25-29 => Hp
+```
+
+## Fallback Data
+
+If the dashboard JSON is not found, the mod can also read:
+
+```text
+mods/tfm2_meta_item_delegate/data/meta_item_builds.tsv
+```
+
+Supported TSV row examples:
+
+```text
+pyromancer	Magic	Magic	Magic
+werewolf	AttackSpeed	Hp	Hp
+fighter	4	14	14
+```
+
 ## Rebuild
 
 ```powershell
-.\native\tfm2_meta_item_delegate\build_mod_048.ps1
+.\native\tfm2_meta_item_delegate\build_mod_049.ps1
 ```
