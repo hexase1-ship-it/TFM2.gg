@@ -12,6 +12,7 @@ from pathlib import Path
 
 ROOT = Path(os.environ.get("TFM2_GAME_ROOT", Path(__file__).resolve().parents[2])).resolve()
 DASHBOARD = Path(__file__).resolve().parents[1]
+REPO_ROOT = DASHBOARD.parents[3] if len(DASHBOARD.parents) > 3 else ROOT
 OUT = DASHBOARD / "data" / "meta-data.js"
 SCORE_MODEL_SPEC = DASHBOARD / "data" / "score-model-spec.json"
 CORE_ITEM_BUILDS_OUT = DASHBOARD / "data" / "core-item-builds.json"
@@ -22,6 +23,8 @@ CHAMPION_TIER_POLICY_OUT = POLICY_EXPORT_DIR / "champion_tier_policy.tsv"
 AI_CHAMPION_POLICY_OUT = POLICY_EXPORT_DIR / "ai_champion_policy.tsv"
 CHAMPION_TIER_POLICY_MOD_OUT = ROOT / "mods" / "tfm2_meta_champion_tiers" / "champion_tier_policy.tsv"
 AI_CHAMPION_POLICY_MOD_OUT = ROOT / "mods" / "tfm2_ai_banpick_probe" / "ai_champion_policy.tsv"
+CHAMPION_TIER_POLICY_SOURCE_MOD_OUT = REPO_ROOT / "tfm2_meta_champion_tiers (팀파매.gg 메타 티어 동기화 애드온 모드)" / "champion_tier_policy.tsv"
+AI_CHAMPION_POLICY_SOURCE_MOD_OUT = REPO_ROOT / "tfm2_ai_banpick_probe (팀파매.gg AI 밴픽 보정 애드온 모드)" / "ai_champion_policy.tsv"
 BANPICK_DATA = DASHBOARD / "data" / "banpick-data.js"
 ITEM_SETTING_PATHS = [
     DASHBOARD / "data" / "item_setting.item_setting",
@@ -54,6 +57,9 @@ POLICY_PRESETS = {
     "hardFearless": {"label": "hardFearless", "weights": {"win": 1.0, "pick": 0.15, "ban": 0.85}},
 }
 POLICY_TIER_MAP = {"OP": "S", "1": "A", "2": "B", "3": "C", "4": "D", "-": "C"}
+POLICY_TIER_SORT = {"S": 5, "A": 4, "B": 3, "C": 2, "D": 1}
+TIER_POLICY_OVERALL_ANCHORS = {"S": 90.0, "A": 75.0, "B": 62.0, "C": 50.0, "D": 35.0}
+AI_POLICY_OVERALL_ANCHORS = {"S": 80.0, "A": 70.0, "B": 60.0, "C": 50.0, "D": 40.0}
 INTERNAL_SCORE_FIELDS = [
     "pickOpportunities",
     "banOpportunities",
@@ -104,16 +110,12 @@ DEFAULT_SCORE_MODEL_SPEC = {
         {"tier": "3", "minLower": 44, "maxPercentile": 0.7},
     ],
     "honey": {
-        "strengthGateStart": 50,
-        "strengthGateSpan": 15,
         "residualDivisor": 20,
-        "residualExponent": 0.75,
-        "strengthGateExponent": 0.75,
         "adaptiveResidualMinDivisor": 3,
         "adaptiveResidualQuantile": 0.75,
         "adaptiveResidualScale": 1.25,
-        "relativeScoreWeight": 0.65,
-        "relativeMagnitudeWeight": 0.35,
+        "rankGapWeight": 0.72,
+        "residualGapWeight": 0.28,
     },
 }
 
@@ -793,6 +795,22 @@ def meta_tier_for_policy_rank(entry, index, total, score_model_spec=None):
     return "4"
 
 
+def tier_policy_overall(policy_tier, eligible=True):
+    if not eligible:
+        return 50.0
+    return TIER_POLICY_OVERALL_ANCHORS.get(policy_tier, 50.0)
+
+
+def ai_policy_overall(entry):
+    if not entry.get("eligible"):
+        return 50.0
+    policy_tier = entry.get("policyTier") or "C"
+    base = AI_POLICY_OVERALL_ANCHORS.get(policy_tier, 50.0)
+    score_delta = clamp_value((finite_float(entry.get("score"), 50.0) - 50.0) / 10.0, -1.0, 1.0) * 2.0
+    lower_delta = clamp_value((finite_float(entry.get("metaLower"), 50.0) - 50.0) / 10.0, -1.0, 1.0)
+    return round1(clamp_value(base + score_delta + lower_delta, 20.0, 80.0))
+
+
 def select_policy_stats(combined_stats, stats_by_patch, patch_versions):
     requested = os.environ.get("TFM2_POLICY_PATCH", "latest").strip()
     if requested in {"", "latest"}:
@@ -846,13 +864,17 @@ def build_policy_exports(champions, stats, generated_at, save_path, patch_key, s
 
     rows = []
     for entry in entries:
-        overall = entry["policyOverall"] if entry["eligible"] else 50.0
+        policy_tier = entry["policyTier"]
+        tier_overall = tier_policy_overall(policy_tier, entry["eligible"])
+        ai_overall = ai_policy_overall(entry)
         rows.append(
             {
                 "championId": entry["championId"],
                 "championName": entry["championName"],
-                "tier": entry["policyTier"],
-                "overall": round1(overall),
+                "tier": policy_tier,
+                "tierOverall": round1(tier_overall),
+                "aiOverall": round1(ai_overall),
+                "rawOverall": round1(entry["policyOverall"] if entry["eligible"] else 50.0),
                 "eligible": entry["eligible"],
                 "metaTier": entry.get("tier") or "-",
                 "score": entry.get("score"),
@@ -869,8 +891,9 @@ def build_policy_exports(champions, stats, generated_at, save_path, patch_key, s
     rows.sort(
         key=lambda row: (
             row["eligible"],
-            row["overall"],
-            {"S": 5, "A": 4, "B": 3, "C": 2, "D": 1}.get(row["tier"], 0),
+            POLICY_TIER_SORT.get(row["tier"], 0),
+            finite_float(row.get("score"), -1),
+            finite_float(row.get("metaLower"), -1),
             str(row["championName"]),
         ),
         reverse=True,
@@ -898,12 +921,30 @@ def build_policy_exports(champions, stats, generated_at, save_path, patch_key, s
         "baselinePresence": round1((context.get("exposure", {}).get("presence") or 0) * 100),
         "eligibleCount": len(eligible),
         "rowCount": len(rows),
+        "policyProfiles": {
+            "championTier": {
+                "overallField": "tierOverall",
+                "semantic": "tier_anchor_for_in_game_sabcd",
+                "anchors": TIER_POLICY_OVERALL_ANCHORS,
+                "note": "overall is an S/A/B/C/D anchor for the native tier addon, not the raw dashboard meta score.",
+            },
+            "aiChampion": {
+                "overallField": "aiOverall",
+                "semantic": "ai_bias_scaled_from_meta_tier",
+                "anchors": AI_POLICY_OVERALL_ANCHORS,
+                "nativeBiasFormula": "clamp((overall - 50) / 20, -1.5, 1.5)",
+                "note": "overall is scaled for AI draft bias so the native addon has a visible but capped effect.",
+            },
+        },
     }
     return {"metadata": metadata, "rows": rows}
 
 
-def render_policy_tsv(policy):
+def render_policy_tsv(policy, profile_key):
     meta = policy["metadata"]
+    profile = (meta.get("policyProfiles") or {}).get(profile_key) or {}
+    overall_field = profile.get("overallField") or "tierOverall"
+    native_bias_formula = profile.get("nativeBiasFormula") or "-"
     lines = [
         "# AUTO_GENERATED_BY_TFM2_META_DASHBOARD",
         "# Do not hand-edit unless you intentionally want to override dashboard meta scoring.",
@@ -916,12 +957,18 @@ def render_policy_tsv(policy):
         f"# Sample: {meta.get('sample', {}).get('mode')} min={meta.get('sample', {}).get('minSample')} reason={meta.get('sample', {}).get('reason')}",
         f"# WinPrior: mean={meta.get('winPrior', {}).get('mean')} kappa={meta.get('winPrior', {}).get('kappa')}",
         f"# BaselinePresence: {meta.get('baselinePresence')}",
+        f"# PolicyKind: {profile_key}",
+        f"# OverallSemantic: {profile.get('semantic')}",
+        f"# OverallNote: {profile.get('note')}",
+        f"# OverallAnchors: {json.dumps(profile.get('anchors') or {}, sort_keys=True, ensure_ascii=False)}",
+        f"# NativeBiasFormula: {native_bias_formula}",
         "# Format: champion_id<TAB>tier<TAB>overall",
-        "# Non-eligible or low-sample champions are emitted as neutral C/50.0 so native AI keeps its base score.",
+        "# Non-eligible or low-sample champions are emitted as neutral C/50.0.",
         "# champion_id\ttier\toverall",
     ]
     for row in policy["rows"]:
-        lines.append(f"{row['championId']}\t{row['tier']}\t{row['overall']:.1f}")
+        overall = round1(row.get(overall_field, 50.0))
+        lines.append(f"{row['championId']}\t{row['tier']}\t{overall:.1f}")
     return "\n".join(lines) + "\n"
 
 
@@ -952,17 +999,17 @@ def write_text_atomic(path: Path, text: str, encoding="utf-8"):
 
 
 def write_policy_exports(policy):
-    tier_text = render_policy_tsv(policy)
-    ai_text = render_policy_tsv(policy)
+    tier_text = render_policy_tsv(policy, "championTier")
+    ai_text = render_policy_tsv(policy, "aiChampion")
     tier_written, tier_skipped = write_policy_file(
         tier_text,
         [CHAMPION_TIER_POLICY_OUT],
-        [CHAMPION_TIER_POLICY_MOD_OUT],
+        [CHAMPION_TIER_POLICY_MOD_OUT, CHAMPION_TIER_POLICY_SOURCE_MOD_OUT],
     )
     ai_written, ai_skipped = write_policy_file(
         ai_text,
         [AI_CHAMPION_POLICY_OUT],
-        [AI_CHAMPION_POLICY_MOD_OUT],
+        [AI_CHAMPION_POLICY_MOD_OUT, AI_CHAMPION_POLICY_SOURCE_MOD_OUT],
     )
     return {
         "championTierPolicy": {

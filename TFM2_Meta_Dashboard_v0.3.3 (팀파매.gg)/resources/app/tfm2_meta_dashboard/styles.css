@@ -382,6 +382,18 @@ tbody tr.active {
   color: #f6c768;
 }
 
+.score-cell.honey-score.honey-positive {
+  color: #f6c768;
+}
+
+.score-cell.honey-score.honey-negative {
+  color: #fb7185;
+}
+
+.score-cell.honey-score.honey-neutral {
+  color: var(--muted);
+}
+
 .muted {
   color: var(--muted);
 }

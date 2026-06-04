@@ -66,16 +66,12 @@ const DEFAULT_SCORE_MODEL_SPEC = {
     { tier: "3", minLower: 44, maxPercentile: 0.7 },
   ],
   honey: {
-    strengthGateStart: 50,
-    strengthGateSpan: 15,
     residualDivisor: 20,
-    residualExponent: 0.75,
-    strengthGateExponent: 0.75,
     adaptiveResidualMinDivisor: 3,
     adaptiveResidualQuantile: 0.75,
     adaptiveResidualScale: 1.25,
-    relativeScoreWeight: 0.65,
-    relativeMagnitudeWeight: 0.35,
+    rankGapWeight: 0.72,
+    residualGapWeight: 0.28,
   },
 };
 const scoreModelSpec = DATA.scoreModelSpec || DEFAULT_SCORE_MODEL_SPEC;
@@ -390,6 +386,30 @@ function quantile(values, q) {
   const high = Math.ceil(index);
   if (low === high) return sorted[low];
   return sorted[low] + (sorted[high] - sorted[low]) * (index - low);
+}
+
+function percentileMap(items, valueFn) {
+  const rows = items
+    .map((item, index) => ({ item, index, value: Number(valueFn(item)) }))
+    .filter((row) => Number.isFinite(row.value))
+    .sort((a, b) => a.value - b.value);
+  const map = new Map();
+  if (!rows.length) return map;
+  if (rows.length === 1) {
+    map.set(rows[0].item, 0.5);
+    return map;
+  }
+  let cursor = 0;
+  while (cursor < rows.length) {
+    let end = cursor + 1;
+    while (end < rows.length && rows[end].value === rows[cursor].value) end += 1;
+    const percentile = ((cursor + end - 1) / 2) / (rows.length - 1);
+    for (let index = cursor; index < end; index += 1) {
+      map.set(rows[index].item, percentile);
+    }
+    cursor = end;
+  }
+  return map;
 }
 
 function currentTierPreset() {
@@ -781,20 +801,15 @@ function assignHoneyScores(entries, context, sampleInfo) {
       continue;
     }
     const expectedPresence = clamp(intercept + slope * Number(entry.strengthScore || 0), (context.exposure?.presence || 0.1) * 50, Math.max(5, maxPresence));
-    const residual = Math.max(0, expectedPresence - Number(entry.presence || 0));
-    const strengthGate = clamp(
-      (Number(entry.strengthScore || 0) - Number(honeySpec.strengthGateStart || 50)) / Math.max(1, Number(honeySpec.strengthGateSpan || 15)),
-      0,
-      1
-    );
+    const residual = expectedPresence - Number(entry.presence || 0);
     const reliability = Math.sqrt(Number(entry.sample || 0) / Math.max(1, Number(entry.sample || 0) + Number(sampleInfo.minSample || 5) * 2));
-    preliminary.push({ entry, expectedPresence, residual, strengthGate, reliability });
+    preliminary.push({ entry, expectedPresence, residual, reliability });
   }
 
   const baseResidualDivisor = Math.max(1, Number(honeySpec.residualDivisor || 20));
   const positiveResiduals = preliminary
-    .filter((row) => row.residual > 0 && row.strengthGate > 0)
-    .map((row) => row.residual);
+    .map((row) => Math.abs(row.residual))
+    .filter((residual) => residual > 0);
   const adaptiveResidual = quantile(positiveResiduals, Number(honeySpec.adaptiveResidualQuantile ?? 0.75));
   const adaptiveResidualDivisor = adaptiveResidual === null
     ? baseResidualDivisor
@@ -804,62 +819,55 @@ function assignHoneyScores(entries, context, sampleInfo) {
         baseResidualDivisor
       );
 
-  const scored = [];
+  const strengthPercentiles = percentileMap(preliminary, (row) => row.entry.strengthScore);
+  const exposurePercentiles = percentileMap(preliminary, (row) => row.entry.presence);
+  const rankWeight = Math.max(0, Number(honeySpec.rankGapWeight ?? 0.72));
+  const residualWeight = Math.max(0, Number(honeySpec.residualGapWeight ?? 0.28));
+  const totalWeight = Math.max(0.001, rankWeight + residualWeight);
+  let positiveCount = 0;
+  let negativeCount = 0;
+  let neutralCount = 0;
+
   for (const row of preliminary) {
-    const { entry, expectedPresence, residual, strengthGate, reliability } = row;
-    const residualFactor = clamp(residual / adaptiveResidualDivisor, 0, 1);
-    const rawScore = 100 *
-      Math.pow(residualFactor, Number(honeySpec.residualExponent || 0.75)) *
-      Math.pow(strengthGate, Number(honeySpec.strengthGateExponent || 0.75)) *
-      reliability;
-    const clampedRawScore = clamp(rawScore, 0, 100);
-    scored.push({ entry, rawScore: clampedRawScore });
+    const { entry, expectedPresence, residual, reliability } = row;
+    const strengthPercentile = strengthPercentiles.get(row) ?? 0.5;
+    const exposurePercentile = exposurePercentiles.get(row) ?? 0.5;
+    const rankGap = strengthPercentile - exposurePercentile;
+    const residualGap = clamp(residual / adaptiveResidualDivisor, -1, 1);
+    const signedScore = clamp(
+      100 * reliability * (
+        (rankWeight / totalWeight) * rankGap +
+          (residualWeight / totalWeight) * residualGap
+      ),
+      -100,
+      100
+    );
+    if (signedScore > 0.05) positiveCount += 1;
+    else if (signedScore < -0.05) negativeCount += 1;
+    else neutralCount += 1;
     entry.honey = {
       eligible: true,
-      score: round1(clampedRawScore),
-      rawScore: round1(clampedRawScore),
+      score: round1(signedScore),
+      rawScore: round1(signedScore),
       strengthScore: entry.strengthScore,
       exposureRate: entry.presence,
       expectedExposure: round1(expectedPresence),
       hiddenGap: round1(residual),
       reliability: round1(reliability * 100),
-      strengthGate: round1(strengthGate * 100),
-      residualFactor: round1(residualFactor * 100),
+      strengthPercentile: round1(strengthPercentile * 100),
+      exposurePercentile: round1(exposurePercentile * 100),
+      rankGap: round1(rankGap * 100),
+      residualFactor: round1(residualGap * 100),
       residualDivisor: round1(adaptiveResidualDivisor),
       sample: entry.sample,
       minSample: entry.minSample,
+      scoreMode: "signed",
     };
   }
-
-  const positiveScores = scored
-    .map((row) => row.rawScore)
-    .filter((score) => Number.isFinite(score) && score > 0)
-    .sort((a, b) => a - b);
-  const maxRawScore = positiveScores.length ? positiveScores[positiveScores.length - 1] : 0;
-  const relativeWeight = clamp(Number(honeySpec.relativeScoreWeight ?? 0.65), 0, 1);
-  const magnitudeWeight = clamp(Number(honeySpec.relativeMagnitudeWeight ?? 0.35), 0, 1);
-  const weightTotal = Math.max(0.001, relativeWeight + magnitudeWeight);
-  for (const row of scored) {
-    const { entry, rawScore } = row;
-    if (!(rawScore > 0) || positiveScores.length < 2 || !(maxRawScore > 0)) {
-      entry.honey.scoreMode = "raw";
-      entry.honey.positiveCount = positiveScores.length;
-      continue;
-    }
-    const lowerCount = positiveScores.filter((score) => score < rawScore).length;
-    const equalCount = positiveScores.filter((score) => score === rawScore).length;
-    const percentile = positiveScores.length > 1
-      ? (lowerCount + Math.max(0, equalCount - 1) / 2) / (positiveScores.length - 1)
-      : 1;
-    const magnitude = rawScore / maxRawScore;
-    const relativeScore = 100 * (
-      (relativeWeight / weightTotal) * percentile +
-      (magnitudeWeight / weightTotal) * magnitude
-    );
-    entry.honey.score = round1(clamp(relativeScore, rawScore, 100));
-    entry.honey.relativePercentile = round1(percentile * 100);
-    entry.honey.scoreMode = "relative";
-    entry.honey.positiveCount = positiveScores.length;
+  for (const row of preliminary) {
+    row.entry.honey.positiveCount = positiveCount;
+    row.entry.honey.negativeCount = negativeCount;
+    row.entry.honey.neutralCount = neutralCount;
   }
 }
 
@@ -905,25 +913,42 @@ function scoreTitle(info) {
 }
 
 function honeyScoreLabel(info) {
-  return info?.score === null || info?.score === undefined ? "-" : info.score.toFixed(1);
+  if (info?.score === null || info?.score === undefined) return "-";
+  const score = Math.abs(Number(info.score)) < 0.05 ? 0 : Number(info.score);
+  return score > 0 ? `+${score.toFixed(1)}` : score.toFixed(1);
+}
+
+function honeyScoreClass(info) {
+  const score = Number(info?.score);
+  if (!Number.isFinite(score)) return "score-cell honey-score";
+  if (score > 0.05) return "score-cell honey-score honey-positive";
+  if (score < -0.05) return "score-cell honey-score honey-negative";
+  return "score-cell honey-score honey-neutral";
 }
 
 function honeyScoreTitle(info) {
   if (!info?.eligible) {
     return info?.reason || "표본 부족";
   }
+  const direction = Number(info.score || 0) > 0.05
+    ? "저평가 후보"
+    : Number(info.score || 0) < -0.05
+      ? "과노출 후보"
+      : "기대 노출과 유사";
   return [
     `꿀챔 점수 ${honeyScoreLabel(info)}`,
-    `원점수 ${info.rawScore ?? "-"}`,
-    `보정 방식 ${info.scoreMode === "relative" ? "필터 내 상대 보정" : "원점수"}`,
+    `해석 ${direction}`,
+    `산식 signed strength-exposure gap`,
     `순수 강도 ${info.strengthScore?.toFixed?.(1) ?? "-"}`,
+    `강도 백분위 ${info.strengthPercentile ?? "-"}%`,
     `노출도 ${round1(info.exposureRate || 0)}%`,
+    `노출 백분위 ${info.exposurePercentile ?? "-"}%`,
+    `순위 차이 ${info.rankGap ?? 0}%`,
     `기대 노출도 ${info.expectedExposure ?? "-"}%`,
-    `숨은 정도 ${info.hiddenGap ?? 0}%`,
-    `강도 게이트 ${info.strengthGate ?? 0}%`,
+    `노출 차이 ${info.hiddenGap ?? 0}%`,
     `잔차 배율 ${info.residualFactor ?? 0}%`,
     `신뢰도 ${info.reliability ?? 0}%`,
-    `양수 후보 ${info.positiveCount ?? 0}`,
+    `+/${info.positiveCount ?? 0} · -/${info.negativeCount ?? 0} · 0/${info.neutralCount ?? 0}`,
     `표본 ${info.sample}/${info.minSample}`,
   ].join(" · ");
 }
@@ -998,7 +1023,7 @@ function compareChampions(a, b) {
   }
   if (state.sort === "honeyScore") {
     return (
-      Number(bh.score ?? -1) - Number(ah.score ?? -1) ||
+      Number(bh.score ?? -Infinity) - Number(ah.score ?? -Infinity) ||
       Number(bm.score ?? -1) - Number(am.score ?? -1) ||
       Number(bs.winRate || -1) - Number(as.winRate || -1) ||
       Number(bs.pickCount || 0) - Number(as.pickCount || 0) ||
@@ -1563,7 +1588,7 @@ function renderRows(champs) {
           <td><div class="champion-name">${championIcon(champ, 38)}<span>${champ.name}</span></div></td>
           <td><span class="tier ${tierClass(tier)}">${tier}</span></td>
           <td><span class="score-cell" title="${scoreTitle(tierInfo)}">${scoreLabel(tierInfo)}</span></td>
-          <td><span class="score-cell honey-score" title="${honeyScoreTitle(honeyInfo)}">${honeyScoreLabel(honeyInfo)}</span></td>
+          <td><span class="${honeyScoreClass(honeyInfo)}" title="${honeyScoreTitle(honeyInfo)}">${honeyScoreLabel(honeyInfo)}</span></td>
           <td>${state.role === "all" ? roleLabel(bestRole(champ)) : roleLabel(state.role)}</td>
           <td>${pct(stat.winRate)}</td>
           <td>${rateWithCount(stat.pickRate, stat.pickCount)}</td>

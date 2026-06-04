@@ -1,6 +1,6 @@
 # AUTO_GENERATED_BY_TFM2_META_DASHBOARD
 # Do not hand-edit unless you intentionally want to override dashboard meta scoring.
-# Generated: 2026-06-05T01:50:55
+# Generated: 2026-06-05T02:36:05
 # Save: C:\Users\hexas\AppData\Roaming\TeamSamoyed\TeamfightManager2\data\save_20260605_013909.data
 # Source: overall patch 2026.3.0
 # Patch: 2026.3.0
@@ -9,42 +9,47 @@
 # Sample: normal min=10 reason=48 days since patch
 # WinPrior: mean=50.0 kappa=59.7
 # BaselinePresence: 30.3
+# PolicyKind: championTier
+# OverallSemantic: tier_anchor_for_in_game_sabcd
+# OverallNote: overall is an S/A/B/C/D anchor for the native tier addon, not the raw dashboard meta score.
+# OverallAnchors: {"A": 75.0, "B": 62.0, "C": 50.0, "D": 35.0, "S": 90.0}
+# NativeBiasFormula: -
 # Format: champion_id<TAB>tier<TAB>overall
-# Non-eligible or low-sample champions are emitted as neutral C/50.0 so native AI keeps its base score.
+# Non-eligible or low-sample champions are emitted as neutral C/50.0.
 # champion_id	tier	overall
-guardian_spirit	A	55.8
-swordman	A	55.2
-executioner	A	54.2
-gunner	A	53.8
-inquisitor	A	53.4
-fighter	A	52.7
-barrier_magician	B	52.3
-ice_mage	B	52.1
-soldier	B	51.9
-priest	B	51.0
-dokkaebi	B	50.3
-spirit_caller	B	50.1
-jiangshi	B	50.1
-shadowmancer	B	50.0
-berserker	C	49.9
-ghost	C	49.4
-druid	C	49.1
-lightning_mage	C	48.7
-bard	C	48.6
-magic_knight	C	48.6
-boomerang_hunter	C	47.9
-pythoness	C	47.9
-demon	C	47.4
-plague_doctor	D	46.9
-siege_breaker	D	46.9
-whip_master	D	45.9
-knight	D	45.3
-dancer	D	45.0
-illusionist	D	44.6
-prisoner	D	44.4
-pole_warrior	D	43.3
-ogre	D	41.1
-hammerer	D	38.7
+guardian_spirit	A	75.0
+swordman	A	75.0
+executioner	A	75.0
+gunner	A	75.0
+inquisitor	A	75.0
+fighter	A	75.0
+barrier_magician	B	62.0
+ice_mage	B	62.0
+soldier	B	62.0
+priest	B	62.0
+dokkaebi	B	62.0
+spirit_caller	B	62.0
+jiangshi	B	62.0
+shadowmancer	B	62.0
+berserker	C	50.0
+ghost	C	50.0
+druid	C	50.0
+lightning_mage	C	50.0
+magic_knight	C	50.0
+bard	C	50.0
+boomerang_hunter	C	50.0
+pythoness	C	50.0
+demon	C	50.0
+siege_breaker	D	35.0
+plague_doctor	D	35.0
+whip_master	D	35.0
+knight	D	35.0
+dancer	D	35.0
+illusionist	D	35.0
+prisoner	D	35.0
+pole_warrior	D	35.0
+ogre	D	35.0
+hammerer	D	35.0
 hitman	C	50.0
 vampire	C	50.0
 dark_mage	C	50.0

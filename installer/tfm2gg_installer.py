@@ -121,6 +121,7 @@ ADDON_PACKAGES = (
 )
 ADDON_BY_ID = {addon.mod_id: addon for addon in ADDON_PACKAGES}
 CORE_ADDON_IDS = (MOD_ID,)
+POLICY_TIER_SORT = {"S": 5, "A": 4, "B": 3, "C": 2, "D": 1}
 
 
 def is_frozen() -> bool:
@@ -162,6 +163,68 @@ def read_json(path: Path, default=None):
 def write_json(path: Path, data) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def policy_tier_from_overall(overall: float) -> str:
+    if overall >= 85:
+        return "S"
+    if overall >= 72:
+        return "A"
+    if overall >= 60:
+        return "B"
+    if overall >= 48:
+        return "C"
+    return "D"
+
+
+def read_policy_rows(path: Path) -> list[dict]:
+    rows = []
+    if not path.exists():
+        return rows
+    try:
+        lines = path.read_text(encoding="utf-8-sig", errors="replace").splitlines()
+    except OSError:
+        return rows
+    for line in lines:
+        if not line or line.startswith("#"):
+            continue
+        parts = line.split("\t")
+        if len(parts) < 3:
+            continue
+        try:
+            overall = float(parts[2])
+        except ValueError:
+            continue
+        rows.append({"championId": parts[0], "tier": parts[1], "overall": overall})
+    return rows
+
+
+def format_tier_counts(rows: list[dict]) -> str:
+    counts = {tier: 0 for tier in POLICY_TIER_SORT}
+    for row in rows:
+        tier = str(row.get("tier") or "C")
+        counts[tier] = counts.get(tier, 0) + 1
+    return " ".join(f"{tier}{counts.get(tier, 0)}" for tier in ["S", "A", "B", "C", "D"])
+
+
+def summarize_champion_tier_policy(path: Path) -> str:
+    rows = read_policy_rows(path)
+    if not rows:
+        return "없음"
+    mismatch = sum(1 for row in rows if policy_tier_from_overall(row["overall"]) != row["tier"])
+    suffix = "정상" if mismatch == 0 else f"불일치 {mismatch}"
+    return f"{len(rows)}행 {format_tier_counts(rows)} ({suffix})"
+
+
+def summarize_ai_policy(path: Path) -> str:
+    rows = read_policy_rows(path)
+    if not rows:
+        return "없음"
+    biases = [max(-1.5, min(1.5, (row["overall"] - 50.0) / 20.0)) for row in rows]
+    positive = sum(1 for bias in biases if bias > 0.05)
+    negative = sum(1 for bias in biases if bias < -0.05)
+    neutral = len(biases) - positive - negative
+    return f"{len(rows)}행 +{positive}/0{neutral}/-{negative} ({min(biases):+.2f}~{max(biases):+.2f})"
 
 
 def copy_tree_contents(src: Path, dst: Path) -> None:
@@ -631,6 +694,17 @@ class InstallerModel:
             "championTier": policy_dir / "champion_tier_policy.tsv",
             "aiChampion": policy_dir / "ai_champion_policy.tsv",
         }
+        meta_tier_mod = game_dir / "mods" / META_TIER_MOD_ID
+        ai_banpick_mod = game_dir / "mods" / AI_BANPICK_MOD_ID
+        addon_logs = {
+            "metaTier": {
+                "latest": (meta_tier_mod / "tier-policy-latest.txt").exists(),
+                "debug": (meta_tier_mod / "debug.log").exists(),
+            },
+            "aiBanpick": {
+                "debug": (ai_banpick_mod / "debug.log").exists(),
+            },
+        }
         installed_manifest = self.installed_manifest(game_dir)
         installed_version = self.package_version(installed_manifest)
         has_legacy = legacy_dashboard.exists() or legacy_dashboard_shell.exists()
@@ -654,6 +728,11 @@ class InstallerModel:
             "addonVersion": addon_status[MOD_ID]["version"],
             "addons": addon_status,
             "policyFiles": {key: path.exists() for key, path in policy_files.items()},
+            "policyDetails": {
+                "championTier": summarize_champion_tier_policy(policy_files["championTier"]),
+                "aiChampion": summarize_ai_policy(policy_files["aiChampion"]),
+            },
+            "addonLogs": addon_logs,
             "coreGeneratedAt": core_data.get("generatedAt") or "-",
             "packageVersion": package_version,
             "sourceRevision": self.manifest_revision(installed_manifest),
@@ -1290,12 +1369,17 @@ class Tfm2InstallerApp(tk.Tk):
             row = installed["addons"][addon.mod_id]
             addon_lines.append(f"{addon.label}: {'설치됨' if row['installed'] else '없음'} {row['version'] if row['installed'] else ''}".rstrip())
         policy_ok = installed["policyFiles"].get("championTier") and installed["policyFiles"].get("aiChampion")
+        meta_logs = installed["addonLogs"]["metaTier"]
+        ai_logs = installed["addonLogs"]["aiBanpick"]
         install_lines = [
             f"실행 파일: {'설치됨' if installed['dashboardShellInstalled'] else '없음'}",
             f"대시보드: {'설치됨' if installed['dashboardInstalled'] else '없음'}",
             f"설치 구조: {installed['layoutStatus']}",
             *addon_lines,
             f"정책 TSV: {'있음' if policy_ok else '없음'}",
+            f"메타 티어 TSV: {installed['policyDetails']['championTier']}",
+            f"AI 보정 TSV: {installed['policyDetails']['aiChampion']}",
+            f"모드 로그: 티어 {'있음' if meta_logs['latest'] or meta_logs['debug'] else '대기'} / AI {'있음' if ai_logs['debug'] else '대기'}",
             f"메타 생성: {installed['coreGeneratedAt']}",
         ]
         self.install_card_var.set("\n".join(install_lines))
@@ -1334,11 +1418,11 @@ class Tfm2InstallerApp(tk.Tk):
             elif kind == "meta_tier_addon":
                 self.model.install_addon(game_dir, addon_id=META_TIER_MOD_ID)
                 self.work_queue.put(("log", "애드온 설치 완료: 메타 티어 동기화 모드가 적용되었습니다."))
-                self.work_queue.put(("success", ("메타 티어 설치 완료", "메타 티어 동기화 애드온 설치가 완료되었습니다.\n게임을 실행 중이었다면 재시작 후 모드 목록에서 활성화해 주세요.")))
+                self.work_queue.put(("success", ("메타 티어 설치 완료", "메타 티어 동기화 애드온 설치가 완료되었습니다.\n대시보드 메타 티어를 인게임 S/A/B/C/D 티어로 변환해 적용합니다.\n게임을 실행 중이었다면 재시작 후 모드 목록에서 활성화해 주세요.")))
             elif kind == "ai_banpick_addon":
                 self.model.install_addon(game_dir, addon_id=AI_BANPICK_MOD_ID)
                 self.work_queue.put(("log", "애드온 설치 완료: AI 밴픽 보정 모드가 적용되었습니다."))
-                self.work_queue.put(("success", ("AI 밴픽 설치 완료", "AI 밴픽 보정 애드온 설치가 완료되었습니다.\n게임을 실행 중이었다면 재시작 후 모드 목록에서 활성화해 주세요.")))
+                self.work_queue.put(("success", ("AI 밴픽 설치 완료", "AI 밴픽 보정 애드온 설치가 완료되었습니다.\nAI가 밴픽 후보를 평가할 때 메타 점수 기반 보정을 더합니다.\n게임을 실행 중이었다면 재시작 후 모드 목록에서 활성화해 주세요.")))
             elif kind == "remove":
                 self.model.remove_all(game_dir)
                 self.work_queue.put(("log", "제거 완료: TFM2.gg 설치 항목을 제거했습니다."))

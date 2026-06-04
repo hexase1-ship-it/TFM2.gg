@@ -48,15 +48,11 @@
     { "tier": "3", "minLower": 44, "maxPercentile": 0.7 }
   ],
   "honey": {
-    "strengthGateStart": 50,
-    "strengthGateSpan": 15,
     "residualDivisor": 20,
-    "residualExponent": 0.75,
-    "strengthGateExponent": 0.75,
     "adaptiveResidualMinDivisor": 3,
     "adaptiveResidualQuantile": 0.75,
     "adaptiveResidualScale": 1.25,
-    "relativeScoreWeight": 0.65,
-    "relativeMagnitudeWeight": 0.35
+    "rankGapWeight": 0.72,
+    "residualGapWeight": 0.28
   }
 }

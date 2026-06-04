@@ -1,47 +1,55 @@
 # AUTO_GENERATED_BY_TFM2_META_DASHBOARD
 # Do not hand-edit unless you intentionally want to override dashboard meta scoring.
-# Generated: 2026-06-04T21:44:16
-# Save: C:\Users\hexas\AppData\Roaming\TeamSamoyed\TeamfightManager2\data\save_20260603_054305.data
+# Generated: 2026-06-05T02:36:05
+# Save: C:\Users\hexas\AppData\Roaming\TeamSamoyed\TeamfightManager2\data\save_20260605_013909.data
 # Source: overall patch 2026.3.0
 # Patch: 2026.3.0
-# Preset: classic weights={"ban": 0.2, "pick": 0.2, "win": 1.0}
-# Sample: normal min=10 reason=9 days since patch
+# Model: tfm2gg-meta-v1
+# Preset: classic weights={"draftPressure": 0.16, "lowerPressure": 0.12, "lowerStrength": 0.88, "strength": 0.84}
+# Sample: normal min=10 reason=48 days since patch
+# WinPrior: mean=50.0 kappa=59.7
+# BaselinePresence: 30.3
+# PolicyKind: aiChampion
+# OverallSemantic: ai_bias_scaled_from_meta_tier
+# OverallNote: overall is scaled for AI draft bias so the native addon has a visible but capped effect.
+# OverallAnchors: {"A": 70.0, "B": 60.0, "C": 50.0, "D": 40.0, "S": 80.0}
+# NativeBiasFormula: clamp((overall - 50) / 20, -1.5, 1.5)
 # Format: champion_id<TAB>tier<TAB>overall
-# Non-eligible or low-sample champions are emitted as neutral C/50.0 so native AI keeps its base score.
+# Non-eligible or low-sample champions are emitted as neutral C/50.0.
 # champion_id	tier	overall
-swordman	B	49.4
-guardian_spirit	B	48.6
-siege_breaker	B	48.0
-executioner	C	46.9
-inquisitor	C	46.1
-barrier_magician	C	45.3
-fighter	C	45.3
-dancer	C	44.8
-gunner	C	44.7
-priest	C	44.0
-soldier	C	43.6
-ice_mage	C	43.5
-dokkaebi	C	43.2
-berserker	D	42.9
-jiangshi	D	42.8
-bard	D	41.6
-shadowmancer	D	41.3
-spirit_caller	D	41.1
-magic_knight	D	41.0
-pythoness	D	40.8
-lightning_mage	D	40.7
-druid	D	40.3
-ghost	D	40.0
-boomerang_hunter	D	38.2
-demon	D	37.5
-plague_doctor	D	37.0
-illusionist	D	36.4
-whip_master	D	36.2
-knight	D	35.1
-prisoner	D	32.8
-pole_warrior	D	32.2
-ogre	D	24.5
-hammerer	D	14.1
+guardian_spirit	A	71.6
+swordman	A	71.4
+executioner	A	71.1
+gunner	A	71.0
+inquisitor	A	70.9
+fighter	A	70.7
+barrier_magician	B	60.5
+ice_mage	B	60.5
+soldier	B	60.4
+priest	B	60.1
+dokkaebi	B	59.9
+spirit_caller	B	59.9
+jiangshi	B	59.9
+shadowmancer	B	59.9
+berserker	C	49.8
+ghost	C	49.7
+druid	C	49.6
+lightning_mage	C	49.4
+magic_knight	C	49.4
+bard	C	49.4
+boomerang_hunter	C	49.2
+pythoness	C	49.2
+demon	C	49.1
+siege_breaker	D	38.9
+plague_doctor	D	38.9
+whip_master	D	38.6
+knight	D	38.4
+dancer	D	38.4
+illusionist	D	38.2
+prisoner	D	38.2
+pole_warrior	D	37.8
+ogre	D	37.2
+hammerer	D	37.0
 hitman	C	50.0
 vampire	C	50.0
 dark_mage	C	50.0
