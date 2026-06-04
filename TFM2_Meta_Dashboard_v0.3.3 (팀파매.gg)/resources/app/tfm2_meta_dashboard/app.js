@@ -84,6 +84,7 @@ const roleLabels = Object.fromEntries(roles);
 const scopeLabels = Object.fromEntries(scopes);
 const leagueMeta = DATA.leagueMeta || {};
 let metaTierCache = null;
+let honeyScoreCache = null;
 
 function splitPayloadForScope(scope = state.scope) {
   if (scope === "overall") return DATA.combinedSplits || {};
@@ -347,6 +348,24 @@ function replayDateInferenceInfo() {
   return DATA.replayDateInference || DATA.sources?.replayDateInference || {};
 }
 
+function replayDateQualityTitle(info = replayDateInferenceInfo()) {
+  const counts = info.confidenceCounts || {};
+  const sources = info.assignedBySource || {};
+  const sourceText = Object.entries(sources)
+    .map(([key, value]) => `${key}: ${fmt(value)}`)
+    .join(" · ");
+  return [
+    `날짜 배정 ${fmt(info.assigned || 0)} / ${fmt(info.sets || 0)}`,
+    `exported ${fmt(counts.exported || 0)}`,
+    `high ${fmt(counts.high || 0)}`,
+    `medium ${fmt(counts.medium || 0)}`,
+    `unknown ${fmt(info.unknown || 0)}`,
+    sourceText,
+  ]
+    .filter(Boolean)
+    .join(" · ");
+}
+
 function scopedSampleVolume() {
   const stats = Object.values(scopedStats());
   const totalMatches = roleTotalMatches();
@@ -485,6 +504,116 @@ function metaTierInfo(stat) {
   return metaTierCache.map.get(stat.championId) || metaScoreForStat(stat, metaTierCache.sampleInfo);
 }
 
+function pureStrengthForStat(stat, sampleInfo = effectiveSampleInfo()) {
+  const sample = Number(stat.pickCount || 0);
+  const rawWinRate = Number(stat.winRate);
+  const minSample = sampleInfo.minSample;
+  if (!Number.isFinite(rawWinRate) || sample < minSample) {
+    return {
+      eligible: false,
+      score: null,
+      sample,
+      minSample,
+      reason: !Number.isFinite(rawWinRate) ? "승률 없음" : `표본 ${sample}/${minSample}`,
+    };
+  }
+  const confidence = clamp(sample / Math.max(minSample * 2, 12), 0, 1);
+  const adjustedWinRate = round1(50 + (rawWinRate - 50) * confidence);
+  const lowWinPenalty = Math.max(0, 45 - rawWinRate) * 0.6;
+  const score = round1(clamp(adjustedWinRate - lowWinPenalty, 0, 100));
+  return {
+    eligible: true,
+    score,
+    sample,
+    minSample,
+    winRate: rawWinRate,
+    adjustedWinRate,
+    lowWinPenalty: round1(lowWinPenalty),
+  };
+}
+
+function exposureRateForStat(stat) {
+  const pickRate = clamp(Number(stat.pickRate || 0), 0, 100);
+  const banRate = clamp(Number(stat.banRate || 0), 0, 100);
+  const banPickRate = Number(stat.banPickRate);
+  if (state.scope === "solo" || String(stat.source || "").includes("solo_rank")) {
+    return pickRate;
+  }
+  if (Number.isFinite(banPickRate)) {
+    return clamp(banPickRate, 0, 100);
+  }
+  return clamp(pickRate + banRate, 0, 100);
+}
+
+function assignPercentile(rows, field, target) {
+  const valid = rows.filter((row) => Number.isFinite(row[field]));
+  if (!valid.length) return;
+  valid
+    .sort((a, b) => Number(a[field]) - Number(b[field]) || a.championName.localeCompare(b.championName, "ko"))
+    .forEach((row, index) => {
+      row[target] = valid.length === 1 ? 1 : (index + 1) / valid.length;
+    });
+}
+
+function honeyScoreCacheKey() {
+  return metaTierCacheKey();
+}
+
+function buildHoneyScoreCache() {
+  const sampleInfo = effectiveSampleInfo();
+  const map = new Map();
+  const rows = DATA.champions.map((champ) => {
+    const stat = displayStatOf(champ.id);
+    const strength = pureStrengthForStat(stat, sampleInfo);
+    const exposureRate = exposureRateForStat(stat);
+    const entry = {
+      championId: champ.id,
+      championName: champ.name,
+      eligible: strength.eligible,
+      score: null,
+      strengthScore: strength.score,
+      exposureRate,
+      sample: strength.sample,
+      minSample: strength.minSample,
+      reason: strength.reason,
+      adjustedWinRate: strength.adjustedWinRate,
+      winRate: strength.winRate,
+      pickRate: Number(stat.pickRate || 0),
+      banRate: Number(stat.banRate || 0),
+    };
+    map.set(champ.id, entry);
+    return entry;
+  });
+  assignPercentile(rows.filter((row) => row.eligible), "strengthScore", "strengthRank");
+  assignPercentile(rows.filter((row) => row.eligible), "exposureRate", "exposureRank");
+  for (const entry of rows) {
+    if (!entry.eligible) continue;
+    const strengthRank = Number(entry.strengthRank || 0);
+    const exposureRank = Number(entry.exposureRank || 0);
+    const hiddenGap = Math.max(0, strengthRank - exposureRank);
+    const reliability = Math.sqrt(entry.sample / Math.max(1, entry.sample + entry.minSample * 2));
+    const strongEnough = Number(entry.strengthScore || 0) >= 50;
+    entry.hiddenGap = round1(hiddenGap * 100);
+    entry.reliability = round1(reliability * 100);
+    entry.score = strongEnough
+      ? round1(clamp(100 * Math.pow(hiddenGap, 0.75) * Math.pow(strengthRank, 1.15) * reliability, 0, 100))
+      : 0;
+  }
+  honeyScoreCache = { key: honeyScoreCacheKey(), map, sampleInfo };
+  return honeyScoreCache;
+}
+
+function honeyScoreInfo(stat) {
+  if (!honeyScoreCache || honeyScoreCache.key !== honeyScoreCacheKey()) {
+    buildHoneyScoreCache();
+  }
+  if (!stat?.championId) {
+    const strength = pureStrengthForStat(stat || {}, honeyScoreCache.sampleInfo);
+    return { eligible: false, score: null, reason: strength.reason };
+  }
+  return honeyScoreCache.map.get(stat.championId) || { eligible: false, score: null, reason: "표본 부족" };
+}
+
 function displayTier(stat) {
   return metaTierInfo(stat).tier || "-";
 }
@@ -508,6 +637,24 @@ function scoreTitle(info) {
     `보정 승률 ${info.adjustedWinRate}%`,
     `픽률 ${info.pickRate}%`,
     `밴률 ${info.banRate}%`,
+    `표본 ${info.sample}/${info.minSample}`,
+  ].join(" · ");
+}
+
+function honeyScoreLabel(info) {
+  return info?.score === null || info?.score === undefined ? "-" : info.score.toFixed(1);
+}
+
+function honeyScoreTitle(info) {
+  if (!info?.eligible) {
+    return info?.reason || "표본 부족";
+  }
+  return [
+    `꿀챔 점수 ${honeyScoreLabel(info)}`,
+    `순수 강도 ${info.strengthScore?.toFixed?.(1) ?? "-"}`,
+    `노출도 ${round1(info.exposureRate || 0)}%`,
+    `숨은 정도 ${info.hiddenGap ?? 0}%`,
+    `신뢰도 ${info.reliability ?? 0}%`,
     `표본 ${info.sample}/${info.minSample}`,
   ].join(" · ");
 }
@@ -559,6 +706,8 @@ function compareChampions(a, b) {
   const bs = displayStatOf(b.id);
   const am = metaTierInfo(as);
   const bm = metaTierInfo(bs);
+  const ah = honeyScoreInfo(as);
+  const bh = honeyScoreInfo(bs);
   if (state.sort === "name") return a.name.localeCompare(b.name, "ko");
   if (state.sort === "tier") {
     return (
@@ -571,6 +720,15 @@ function compareChampions(a, b) {
   }
   if (state.sort === "metaScore") {
     return (
+      Number(bm.score ?? -1) - Number(am.score ?? -1) ||
+      Number(bs.winRate || -1) - Number(as.winRate || -1) ||
+      Number(bs.pickCount || 0) - Number(as.pickCount || 0) ||
+      a.name.localeCompare(b.name, "ko")
+    );
+  }
+  if (state.sort === "honeyScore") {
+    return (
+      Number(bh.score ?? -1) - Number(ah.score ?? -1) ||
       Number(bm.score ?? -1) - Number(am.score ?? -1) ||
       Number(bs.winRate || -1) - Number(as.winRate || -1) ||
       Number(bs.pickCount || 0) - Number(as.pickCount || 0) ||
@@ -998,7 +1156,7 @@ function renderSummary(champs) {
     <div class="summary-card"><span>관계 경기 표본</span><strong>${(relations.groups || 0).toLocaleString()}</strong></div>
     <div class="summary-card"><span>티어 기준</span><strong>${preset.label}</strong></div>
     <div class="summary-card"><span>표본 기준</span><strong>${sampleInfo.label}</strong></div>
-    <div class="summary-card"><span>날짜 추정</span><strong>${fmt(replayInfo.assigned || 0)} / ${fmt(replayInfo.sets || 0)}</strong></div>
+    <div class="summary-card" title="${replayDateQualityTitle(replayInfo)}"><span>날짜 추정</span><strong>${fmt(replayInfo.assigned || 0)} / ${fmt(replayInfo.sets || 0)}</strong></div>
   `;
   const exportMismatched = Boolean(DATA.sources.metaExportMismatched);
   const exportIncompatible = DATA.sources.metaExportUsable === false && DATA.sources.metaExportReason;
@@ -1127,6 +1285,7 @@ function renderRows(champs) {
     .map((champ, index) => {
       const stat = displayStatOf(champ.id);
       const tierInfo = metaTierInfo(stat);
+      const honeyInfo = honeyScoreInfo(stat);
       const tier = tierInfo.tier;
       return `
         <tr class="${state.selected === champ.id ? "active" : ""}" data-row="${champ.id}">
@@ -1134,6 +1293,7 @@ function renderRows(champs) {
           <td><div class="champion-name">${championIcon(champ, 38)}<span>${champ.name}</span></div></td>
           <td><span class="tier ${tierClass(tier)}">${tier}</span></td>
           <td><span class="score-cell" title="${scoreTitle(tierInfo)}">${scoreLabel(tierInfo)}</span></td>
+          <td><span class="score-cell honey-score" title="${honeyScoreTitle(honeyInfo)}">${honeyScoreLabel(honeyInfo)}</span></td>
           <td>${state.role === "all" ? roleLabel(bestRole(champ)) : roleLabel(state.role)}</td>
           <td>${pct(stat.winRate)}</td>
           <td>${rateWithCount(stat.pickRate, stat.pickCount)}</td>
@@ -1335,7 +1495,7 @@ function championReplayEntries(championId) {
       }
     }
   }
-  return entries.sort((a, b) => Number(a.match.id || 0) - Number(b.match.id || 0));
+  return entries.sort((a, b) => matchChronologyValue(a.match) - matchChronologyValue(b.match));
 }
 
 function isKnownReplayDate(value) {
@@ -1474,7 +1634,7 @@ function championTrendBuckets(championId) {
     return patchStatTrend;
   }
 
-  const matches = scopedMatchAnalysisRows().sort((a, b) => Number(a.id || 0) - Number(b.id || 0));
+  const matches = scopedMatchAnalysisRows().sort((a, b) => matchChronologyValue(a) - matchChronologyValue(b));
   const context = replayTrendContext(matches);
   const buckets = new Map();
   for (const match of matches) {
@@ -1780,8 +1940,10 @@ function renderChampionTabNav() {
 function renderChampionMetricRow(stat) {
   const games = Number(stat.pickCount || 0);
   const tierInfo = metaTierInfo(stat);
+  const honeyInfo = honeyScoreInfo(stat);
   return `<div class="metric-row">
     <div class="metric"><span>메타 스코어</span><strong title="${scoreTitle(tierInfo)}">${scoreLabel(tierInfo)}</strong></div>
+    <div class="metric"><span>꿀챔 점수</span><strong title="${honeyScoreTitle(honeyInfo)}">${honeyScoreLabel(honeyInfo)}</strong></div>
     <div class="metric"><span>승률</span><strong>${pct(stat.winRate)}</strong></div>
     <div class="metric"><span>승/패</span><strong>${fmt(stat.wins)} / ${fmt(stat.losses)}</strong></div>
     <div class="metric"><span>K/D/A</span><strong>${fmt(stat.kills)} / ${fmt(stat.deaths)} / ${fmt(stat.assists)}</strong></div>
@@ -1922,15 +2084,30 @@ function matchDateKey(match) {
   return match?.dateKey || match?.date || "unknown";
 }
 
+function matchChronologyValue(match) {
+  const parsed = Date.parse(match?.resultTime || match?.dateTime || match?.date || match?.dateKey || "");
+  if (Number.isFinite(parsed)) return parsed;
+  const sourceId = Number(match?.sourceId ?? match?.id);
+  return Number.isFinite(sourceId) ? sourceId : 0;
+}
+
 function matchDateLabel(match) {
   return match?.dateLabel || match?.date || "날짜 미수집";
+}
+
+function matchDisplayId(match) {
+  if (match?.source === "solo") return `Solo #${match.sourceId ?? String(match.id || "").replace(/^solo:/, "")}`;
+  return `Replay #${match?.sourceId ?? match?.id ?? "-"}`;
 }
 
 function matchSearchText(match) {
   return [
     match.id,
+    match.source,
+    match.sourceId,
     match.version,
     matchDateLabel(match),
+    match.dateSource,
     match.leagueLabel,
     match.regionLabel,
     match.divisionLabel,
@@ -1983,7 +2160,8 @@ function matchDateOptions() {
 }
 
 function durationLabel(seconds) {
-  const value = Number(seconds || 0);
+  const value = Number(seconds);
+  if (!Number.isFinite(value) || value <= 0) return "-";
   const minute = Math.floor(value / 60);
   const second = String(value % 60).padStart(2, "0");
   return `${minute}:${second}`;
@@ -1997,6 +2175,11 @@ function teamLabel(match, side) {
 
 function matchContextLabel(match) {
   const parts = [];
+  if (match.source === "solo" || match.competitionKind === "solo_rank") {
+    if (match.regionLabel) parts.push(match.regionLabel);
+    parts.push("솔로랭크");
+    return parts.join(" · ");
+  }
   if (match.leagueLabel) {
     parts.push(match.leagueLabel);
   } else if (match.regionLabel || match.divisionLabel) {
@@ -2148,7 +2331,7 @@ function renderMatchList(rows) {
     .map((match) => {
       const active = String(state.selectedMatch) === String(match.id);
       return `<button class="match-list-item ${active ? "active" : ""}" data-match="${match.id}">
-        <span>#${match.id} · ${matchDateLabel(match)}</span>
+        <span>${matchDisplayId(match)} · ${matchDateLabel(match)}</span>
         <strong>${teamLabel(match, "blue")} ${match.blue.killsTotal}:${match.red.killsTotal} ${teamLabel(match, "red")}</strong>
         <small>${matchContextLabel(match)} · 패치 ${match.version} · 경기시간 ${durationLabel(match.durationSec)} · ${match.winner === "blue" ? "블루 승" : "레드 승"}</small>
       </button>`;
@@ -2287,7 +2470,7 @@ function renderMatchView() {
         ${replayNameNotice()}
         <div class="match-title">
           <div>
-            <small>Replay #${match.id} · ${matchDateLabel(match)} · ${matchContextLabel(match)} · 패치 ${match.version} · 경기시간 ${durationLabel(match.durationSec)}</small>
+            <small>${matchDisplayId(match)} · ${matchDateLabel(match)} · ${matchContextLabel(match)} · 패치 ${match.version} · 경기시간 ${durationLabel(match.durationSec)}</small>
             <h2>${teamLabel(match, "blue")} vs ${teamLabel(match, "red")}</h2>
           </div>
           <span class="pill ${match.winner === "blue" ? "blue-pill" : "red-pill"}">${match.winner === "blue" ? "블루 승리" : "레드 승리"}</span>

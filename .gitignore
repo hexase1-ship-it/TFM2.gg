@@ -2,6 +2,7 @@
 _backup*/
 *.zip
 dist/
+dist_*/
 *.spec
 
 # Python local caches

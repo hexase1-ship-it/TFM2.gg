@@ -1,11 +1,11 @@
 # AUTO_GENERATED_BY_TFM2_META_DASHBOARD
 # Do not hand-edit unless you intentionally want to override dashboard meta scoring.
-# Generated: 2026-06-04T21:44:16
-# Save: C:\Users\hexas\AppData\Roaming\TeamSamoyed\TeamfightManager2\data\save_20260603_054305.data
+# Generated: 2026-06-04T23:55:25
+# Save: C:\Users\hexas\AppData\Roaming\TeamSamoyed\TeamfightManager2\data\save_20260604_200353.data
 # Source: overall patch 2026.3.0
 # Patch: 2026.3.0
 # Preset: classic weights={"ban": 0.2, "pick": 0.2, "win": 1.0}
-# Sample: normal min=10 reason=9 days since patch
+# Sample: normal min=10 reason=48 days since patch
 # Format: champion_id<TAB>tier<TAB>overall
 # Non-eligible or low-sample champions are emitted as neutral C/50.0 so native AI keeps its base score.
 # champion_id	tier	overall

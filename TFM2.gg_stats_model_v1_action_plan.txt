@@ -1,0 +1,480 @@
+TFM2.gg 통계 모델 v1 고도화 실행계획
+작성 기준: GPT Pro 자문 반영
+
+목표
+====
+
+현재 대시보드의 메타 티어/메타 스코어/꿀챔 점수를 단순 승률+픽률+밴률 가중합에서 한 단계 올려,
+표본 수, 불확실성, 역할별 통계, 대회/솔랭 데이터 차이, 밴 정보 부재를 안정적으로 반영하는 v1 모델로 개편한다.
+
+v1의 핵심 원칙
+==============
+
+1. MCMC 같은 과한 모델은 쓰지 않는다.
+   현재 배포 도구와 Electron 대시보드에서 빠르게 계산되어야 하므로, Beta-binomial empirical Bayes와 Wilson/posterior lower bound 수준이 적절하다.
+
+2. 화면 표시용 점수와 내부 판단 점수를 분리한다.
+   현재처럼 하나의 종합 점수에 승률, 픽률, 밴률을 모두 넣으면 "강한 챔피언"과 "많이 견제되는 챔피언"이 섞인다.
+
+3. 최소 표본 조건은 유지하되, 표본 부족을 단순 탈락으로만 처리하지 않는다.
+   픽 수가 적으면 승률을 50% 근처로 수축시키고, 티어 판단에는 하한 점수를 사용한다.
+
+4. 솔랭에는 밴 데이터가 없으므로 밴률 0으로 섞지 않는다.
+   솔랭의 밴 데이터는 "없는 값"으로 처리하고, 대회 밴률과 구분한다.
+
+5. 역할별 메타 스코어는 역할별 픽/승률을 중심으로 계산한다.
+   밴은 특정 역할의 직접 성능이라기보다 챔피언 전체 압박 신호에 가깝기 때문에, 역할 점수의 강한 구성요소로 쓰지 않는다.
+
+6. 꿀챔 점수는 "강한데 덜 노출된 챔피언"을 찾는 보조 지표다.
+   메타 티어를 대체하지 않고, 발굴/추천용 점수로만 사용한다.
+
+
+현재 모델의 문제 정리
+=====================
+
+현재 app.js의 메타 스코어는 대략 다음 구조다.
+
+  adjustedWinRate = 50 + (rawWinRate - 50) * confidence
+  metaScore = weighted(adjustedWinRate, pickRate, banRate)
+  lowWinPenalty = max(0, 45 - rawWinRate) * 0.8
+  finalScore = metaScore - lowWinPenalty
+
+문제점:
+
+1. confidence가 임의식이다.
+   표본이 적으면 승률을 50으로 당기는 방향은 맞지만, 통계적 posterior가 아니어서 표본 수에 따른 불확실성이 정확히 반영되지 않는다.
+
+2. 티어가 불확실성을 직접 보지 않는다.
+   현재는 점수와 백분위로 OP/1/2/3티어를 나누지만, "이 챔피언의 하한 성능이 어디까지인가"를 보지 않는다.
+
+3. 픽률/밴률이 강도와 섞인다.
+   밴률이 높은데 승률이 낮은 챔피언이 과대평가될 수 있다.
+
+4. 역할별 통계에서 밴률이 역할 점수에 과하게 들어갈 수 있다.
+   밴은 보통 챔피언 단위 신호이지 특정 포지션의 직접 성능 신호가 아니다.
+
+5. 꿀챔 점수가 단순 rank gap에 가까우면 저표본 챔피언이 튈 수 있다.
+   강도, 노출도, 표본 신뢰도를 함께 써야 한다.
+
+
+v1 데이터 모델
+==============
+
+각 챔피언/역할/스코프 조합마다 내부적으로 다음 값을 계산한다.
+
+raw
+---
+
+- championId
+- championName
+- role
+- scope: all / tournament / solo
+- regionKey
+- divisionKey
+- patchKey
+- pickCount
+- winCount
+- lossCount
+- banCount
+- pickOpportunities
+- banOpportunities
+- sourceMatchCounts
+
+win
+---
+
+- rawWinRate
+- priorMean
+- priorKappa
+- posteriorMean
+- posteriorSd
+- posteriorLower
+- reliability
+
+exposure
+--------
+
+- pickRatePosterior
+- banRatePosterior
+- draftPresence
+- sourceNormalizedPresence
+- draftPressureScore
+
+scores
+------
+
+- strengthScore
+- strengthLower
+- draftPressureScore
+- metaScoreV2
+- metaLowerV2
+- honeyScoreV2
+
+tier
+----
+
+- metaTierV2
+- tierReason
+- minSample
+- sampleMode
+
+caveats
+-------
+
+- lowSample
+- noBanData
+- inferredDateData
+- mixedSourceData
+
+
+권장 산식
+=========
+
+1. 승률 posterior
+-----------------
+
+픽 수 n, 승 수 w, 사전 평균 m, 사전 강도 k일 때:
+
+  alpha = w + m * k
+  beta = (n - w) + (1 - m) * k
+  posteriorMean = alpha / (alpha + beta)
+  posteriorSd = sqrt(alpha * beta / ((alpha + beta)^2 * (alpha + beta + 1)))
+  posteriorLower = posteriorMean - z * posteriorSd
+
+v1 권장:
+
+  z = 0.84
+
+0.84는 대략 80% 단측 하한이다. 너무 보수적으로 잡으면 모든 티어가 눌리므로,
+초기 배포에서는 95% 하한보다 80% 하한이 실사용에 적합하다.
+
+priorMean:
+
+  같은 스코프/패치/역할의 전체 평균 승률을 우선 사용한다.
+  계산이 불안정하면 0.5를 fallback으로 둔다.
+
+priorKappa:
+
+  method-of-moments로 추정하되 clamp한다.
+
+  kappa = m * (1 - m) / betweenVariance - 1
+
+v1 clamp:
+
+  일반: 12 <= kappa <= 80
+  역할별: 18 <= kappa <= 100
+  저표본/초반 패치: 8 <= kappa <= 50
+
+
+2. 순수 강도 점수
+-----------------
+
+강도는 픽률/밴률을 넣지 않고 승률 posterior 중심으로 계산한다.
+
+  strengthScore = 100 * (0.7 * posteriorMean + 0.3 * posteriorLower)
+  strengthLower = 100 * posteriorLower
+
+이렇게 하면 표본이 적고 승률만 높은 챔피언은 평균 점수는 어느 정도 올라가도,
+티어 판단용 하한 점수는 과하게 오르지 않는다.
+
+
+3. 드래프트 압박 점수
+---------------------
+
+대회:
+
+  pickPost = betaPosterior(pickCount, pickOpportunities)
+  banPost = betaPosterior(banCount, banOpportunities)
+  draftPresence = 1 - (1 - pickPost) * (1 - banPost)
+
+솔랭:
+
+  draftPresence = pickPost
+  banPost = null
+
+전체:
+
+  대회 presence와 솔랭 presence를 각 sourceMatchCounts로 가중 평균한다.
+  솔랭 ban을 0으로 취급하지 않는다.
+
+압박 점수:
+
+  pressureRaw = ln((draftPresence + eps) / (baselinePresence + eps))
+  draftPressureScore = clamp(50 + 16 * pressureRaw, 0, 100)
+
+eps:
+
+  0.001
+
+
+4. 메타 스코어 v2
+-----------------
+
+메타 스코어는 "순수 강도"를 주력으로, 드래프트 압박을 보조로 둔다.
+
+기본:
+
+  metaScoreV2 = 0.78 * strengthScore + 0.22 * draftPressureScore
+  metaLowerV2 = 0.82 * strengthLower + 0.18 * draftPressureScore
+
+하드피어리스 프리셋:
+
+  metaScoreV2 = 0.72 * strengthScore + 0.28 * draftPressureScore
+  metaLowerV2 = 0.78 * strengthLower + 0.22 * draftPressureScore
+
+클래식 프리셋:
+
+  metaScoreV2 = 0.84 * strengthScore + 0.16 * draftPressureScore
+  metaLowerV2 = 0.88 * strengthLower + 0.12 * draftPressureScore
+
+주의:
+
+기존처럼 픽률/밴률을 직접 더하지 않고, source-normalized draft pressure로만 보조 반영한다.
+
+
+5. 메타 티어 v2
+---------------
+
+티어는 metaScoreV2가 아니라 metaLowerV2를 우선한다.
+즉 "잘 풀렸을 때 높은 점수"보다 "불확실성을 감안해도 높은 점수"를 더 중요하게 본다.
+
+권장 기준:
+
+  OP:
+    metaLowerV2 >= 56
+    그리고 eligible 챔피언 중 상위 8% 이내
+
+  1티어:
+    metaLowerV2 >= 51
+    그리고 상위 22% 이내
+
+  2티어:
+    metaLowerV2 >= 48
+    그리고 상위 45% 이내
+
+  3티어:
+    metaLowerV2 >= 44
+    그리고 상위 70% 이내
+
+  4티어:
+    최소 표본 충족하지만 위 조건 미충족
+
+  -:
+    최소 표본 미충족
+
+기존 티어와 병행:
+
+  legacyMetaTier는 유지하고, v1 검증 기간 동안 내부/개발자 표시로 비교한다.
+  기본 UI 전환은 golden sample 검증 후 진행한다.
+
+
+6. 꿀챔 점수 v2
+---------------
+
+목표:
+
+  꿀챔 점수 = 순수하게 강한 정도에 비해 덜 픽/밴되는 정도
+
+잘못된 방식:
+
+  honey = metaScore - pickRate - banRate
+
+이 방식은 저표본 챔피언을 과대평가할 수 있어 금지한다.
+
+권장 방식:
+
+  expectedExposure = f(strengthScore, scope, role, patch)
+  observedExposure = sourceNormalizedPresence
+  hiddenResidual = max(0, expectedExposure - observedExposure)
+  strengthGate = clamp((strengthScore - 50) / 15, 0, 1)
+  reliability = sqrt(pickCount / (pickCount + 2 * minSample))
+  honeyScoreV2 = 100 * normalizedResidual^0.75 * strengthGate^0.75 * reliability
+
+expectedExposure v1:
+
+  같은 스코프/패치/역할 안에서 strengthScore -> exposure의 단조 회귀 또는 단순 선형 회귀를 사용한다.
+  구현 복잡도를 낮추려면 v1에서는 다음 대체식을 사용한다.
+
+  expectedExposure = percentileToExposure(strengthPercentile)
+
+즉, 강도 백분위에 해당하는 평균 노출도를 기대값으로 잡고,
+실제 노출도가 그보다 낮을 때만 꿀챔 점수를 준다.
+
+권장 caveat:
+
+  "꿀챔 점수는 메타 티어가 아니라 발굴용 보조 지표입니다."
+
+
+역할별 신뢰도 상승 방향
+=======================
+
+현재 역할별 통계는 byPosition 기반으로 어느 정도 분리되어 있다.
+v1에서는 다음 원칙을 적용한다.
+
+1. 역할별 strength는 역할별 pick/win만 사용한다.
+2. 역할별 draft pressure는 pick pressure 중심으로 계산한다.
+3. ban pressure는 global champion pressure로 표시하되, 역할 점수에는 낮은 비중 또는 0 비중으로 둔다.
+4. 역할별 표본이 부족하면 전체 챔피언 strength로 부분 수축한다.
+
+부분 수축:
+
+  rolePosteriorMean = weighted(rolePosteriorMean, championGlobalPosteriorMean)
+
+가중치:
+
+  roleWeight = rolePickCount / (rolePickCount + rolePriorKappa)
+  finalRoleStrength = roleWeight * roleStrength + (1 - roleWeight) * globalStrength
+
+이렇게 하면 역할 표본 1~3개로 특정 포지션 점수가 튀는 문제를 줄일 수 있다.
+
+
+Python/JS 산식 드리프트 방지
+============================
+
+가장 중요한 유지보수 포인트다.
+
+현재 문제:
+
+  app.js와 build_meta_data.py에 비슷한 산식이 따로 들어가면,
+  화면 점수와 policy TSV 점수가 달라질 수 있다.
+
+권장 선택지:
+
+1. 최선:
+   JS 단일 scoring engine을 만든다.
+
+   resources/app/tfm2_meta_dashboard/score_model.js
+
+   Python 생성기는 TSV 정책 산출 때 Node를 호출해서 동일 엔진으로 계산한다.
+
+2. 현실적 v1:
+   score_model_spec.json을 만들고,
+   Python/JS가 같은 spec을 읽어 같은 산식을 구현한다.
+   fixtures로 두 결과를 비교한다.
+
+v1에서는 2번을 먼저 추천한다.
+이유:
+
+  현재 데이터 생성 파이프라인이 Python 중심이고,
+  사용자 PC에 Node 실행 환경을 강제하면 배포 호환성 리스크가 생길 수 있다.
+
+
+구현 단계
+=========
+
+Phase 1. 모델 기반 추가
+-----------------------
+
+- score_model_spec.json 추가
+- app.js에 v2 scoring helper 추가
+- legacyMetaScore / legacyMetaTier 유지
+- metaScoreV2 / metaTierV2 / honeyScoreV2 계산 추가
+- UI에는 기존 컬럼명 유지하되 내부 tooltip에 v2 근거 표시
+
+검증:
+
+- 기존 데이터 로딩 성공
+- scope/region/division/role/patch 필터 전환 오류 없음
+- OP/1/2/3/4/- 분포가 비정상적으로 한쪽으로 몰리지 않음
+
+
+Phase 2. Python 정책 산출 동기화
+--------------------------------
+
+- build_meta_data.py에 동일 v2 산식 추가
+- champion_tier_policy.tsv와 ai_champion_policy.tsv는 v2 기준으로 생성
+- policy export에 modelVersion, minSample, confidence를 주석 또는 별도 manifest로 기록
+
+검증:
+
+- 대시보드 상위 10개와 TSV 상위 10개의 점수/티어 일치
+- 설치 도구로 패키지 후 payload 정책 파일 포함 확인
+
+
+Phase 3. UI 정리
+----------------
+
+- "메타 스코어" 컬럼: v2 기본 표시
+- 상세 패널:
+  - 순수 강도
+  - 드래프트 압박
+  - 표본 신뢰도
+  - 하한 점수
+  - 꿀챔 점수
+- 개발자/고급 보기:
+  - legacy score 비교
+  - posterior mean/lower 표시
+
+검증:
+
+- 긴 챔피언명/역할명/툴팁이 깨지지 않음
+- 필터 전환 시 정렬/선택 상태 정상
+
+
+Phase 4. 기본값 전환
+--------------------
+
+- v2를 기본 메타 스코어/티어로 전환
+- legacy는 내부 비교용으로 남기거나 제거
+- README/릴리스 노트에 "통계 모델 v1" 설명 추가
+
+검증:
+
+- 최신 저장 세이브로 meta-data 재생성
+- Steam 설치 폴더 동기화 후 TFM2MetaDashboard.exe 실행
+- 정책 애드온 TSV가 최신 산식 기준으로 생성/설치됨
+
+
+테스트 기준
+===========
+
+필수 smoke test:
+
+1. meta-data.js 생성 성공
+2. TFM2MetaDashboard.exe 실행 성공
+3. 전체/대회/솔랭 scope 전환 성공
+4. 지역 필터 전환 성공
+5. 역할 필터 전환 성공
+6. 패치 필터 전환 성공
+7. 메타 스코어 정렬 정상
+8. 꿀챔 점수 정렬 정상
+9. 정책 TSV 생성 정상
+10. 설치 도구 패키지 구성 정상
+
+통계 sanity check:
+
+1. 저표본 고승률 챔피언이 OP로 과도하게 튀지 않아야 한다.
+2. 고밴 저승률 챔피언이 메타 티어 최상단을 독식하지 않아야 한다.
+3. 솔랭-only scope에서 banRate를 0으로 오해하지 않아야 한다.
+4. 역할별 표본이 적으면 전체 챔피언 성능으로 부드럽게 수축되어야 한다.
+5. 꿀챔 점수 상위권은 "강한데 덜 노출된" 챔피언이어야 하며, 단순 저픽 챔피언 목록이 아니어야 한다.
+
+
+보류할 v2/v3 고급 기능
+=======================
+
+이번 v1에서 넣지 않는 것:
+
+- MCMC
+- 선수/팀/리그 random effect
+- 완전한 Bayesian hierarchical model
+- 지역 partial pooling 고도화
+- 시간 감쇠 모델 고도화
+- 티어별 확률 분포 표시
+
+이유:
+
+현재 목표는 배포 가능한 안정 모델이다.
+과한 모델을 먼저 넣으면 설명 가능성, 속도, 디버깅, 정책 TSV 동기화가 나빠진다.
+
+
+최종 채택안
+===========
+
+1. 기존 단순 가중합은 legacy로 보존한다.
+2. v1 기본 모델은 Beta-binomial EB + posterior lower bound + draft pressure 분리로 구현한다.
+3. 메타 티어는 metaLowerV2 기준으로 산정한다.
+4. 꿀챔 점수는 expected exposure residual 기반으로 바꾼다.
+5. 역할별 점수는 역할 승률/픽률 중심으로 계산하고, 밴률은 전역 압박 신호로 취급한다.
+6. Python/JS 산식 드리프트 방지를 위해 spec/fixture를 둔다.
+7. 충분히 검증한 뒤 v2 점수를 기본 UI와 정책 TSV에 적용한다.

@@ -1114,6 +1114,31 @@ def parse_enum_field(text, field):
     return match.group(1) if match else None
 
 
+def parse_datetime_field(text, field):
+    match = re.search(rf"\b{re.escape(field)}:\s*(\d{{4}}-\d{{2}}-\d{{2}}T\d{{2}}:\d{{2}}:\d{{2}})", text)
+    return match.group(1) if match else None
+
+
+def date_key_from_datetime(value):
+    if not value:
+        return None
+    match = re.match(r"^(\d{4}-\d{2}-\d{2})", str(value))
+    return match.group(1) if match else None
+
+
+def days_since_latest_patch(known_date, patch_events):
+    if not known_date:
+        return None, None
+    patch_dates = [event["date"] for event in patch_events or [] if event.get("date") and event["date"] <= known_date]
+    latest_patch = max(patch_dates) if patch_dates else None
+    if not latest_patch:
+        return None, None
+    try:
+        return latest_patch, (datetime.fromisoformat(known_date) - datetime.fromisoformat(latest_patch)).days
+    except ValueError:
+        return latest_patch, None
+
+
 def parse_league_competition_types(path: Path):
     if not path.exists():
         return {}
@@ -1203,13 +1228,19 @@ def infer_replay_dates(export_dir: Path):
         "enabled": False,
         "source": "match_stats + teams + year_schedules",
         "sets": 0,
+        "tournamentSets": 0,
+        "soloSets": 0,
         "series": 0,
         "assigned": 0,
+        "tournamentAssigned": 0,
+        "soloAssigned": 0,
         "unknown": 0,
         "latestKnownDate": None,
         "latestPatchDate": None,
         "daysSincePatch": None,
         "confidence": "none",
+        "confidenceCounts": {},
+        "assignedBySource": {},
         "patchEvents": [],
     }
     team_meta = parse_debug_team_metadata(export_dir / "teams.debug.txt")
@@ -1218,6 +1249,7 @@ def infer_replay_dates(export_dir: Path):
     schedule = parse_year_schedule_metadata(export_dir / "year_schedules.debug.txt")
     competition_types = parse_league_competition_types(export_dir / "league_competitions.debug.txt")
     status["sets"] = len(match_stats)
+    status["tournamentSets"] = len(match_stats)
     status["patchEvents"] = schedule["patchEvents"]
     if not team_meta or not match_stats or not schedule["leagueRegular"]:
         status["unknown"] = len(match_stats)
@@ -1241,26 +1273,37 @@ def infer_replay_dates(export_dir: Path):
     replay_dates = {}
     regular_ordinals = defaultdict(int)
     playoff_ordinals = defaultdict(int)
+    tournament_ordinals = defaultdict(int)
     assigned = 0
     for series_index, item in enumerate(series):
         league_id = item["leagueId"]
-        if league_id is None:
-            continue
         league_type = competition_types.get(league_id) or "Spring"
-        regular_schedule = schedule["leagueRegular"].get(league_type) or []
-        playoff_schedule = schedule["leaguePlayoff"].get(league_type) or []
         schedule_row = None
         event_kind = "LeagueMatch"
-        regular_index = regular_ordinals[(league_id, league_type)]
-        if regular_index < len(regular_schedule):
-            schedule_row = regular_schedule[regular_index]
-            regular_ordinals[(league_id, league_type)] += 1
+        date_source = "league_schedule_inferred"
+        date_confidence = "high"
+        if league_id is not None:
+            regular_schedule = schedule["leagueRegular"].get(league_type) or []
+            playoff_schedule = schedule["leaguePlayoff"].get(league_type) or []
+            regular_index = regular_ordinals[(league_id, league_type)]
+            if regular_index < len(regular_schedule):
+                schedule_row = regular_schedule[regular_index]
+                regular_ordinals[(league_id, league_type)] += 1
+            else:
+                playoff_index = playoff_ordinals[(league_id, league_type)]
+                if playoff_index < len(playoff_schedule):
+                    schedule_row = playoff_schedule[playoff_index]
+                    playoff_ordinals[(league_id, league_type)] += 1
+                    event_kind = "LeaguePlayoff"
         else:
-            playoff_index = playoff_ordinals[(league_id, league_type)]
-            if playoff_index < len(playoff_schedule):
-                schedule_row = playoff_schedule[playoff_index]
-                playoff_ordinals[(league_id, league_type)] += 1
-                event_kind = "LeaguePlayoff"
+            tournament_schedule = (schedule["tournamentGroup"] or []) + (schedule["tournament"] or [])
+            tournament_index = tournament_ordinals["international"]
+            if tournament_index < len(tournament_schedule):
+                schedule_row = tournament_schedule[tournament_index]
+                tournament_ordinals["international"] += 1
+                event_kind = schedule_row.get("event") or "TournamentMatch"
+                date_source = "tournament_schedule_inferred"
+                date_confidence = "medium"
         if not schedule_row:
             continue
 
@@ -1271,8 +1314,8 @@ def infer_replay_dates(export_dir: Path):
                 "date": schedule_row["date"],
                 "dateKey": schedule_row["dateKey"],
                 "dateLabel": f"{schedule_row['date']} (일정 추정)",
-                "dateSource": "league_schedule_inferred",
-                "dateConfidence": "high",
+                "dateSource": date_source,
+                "dateConfidence": date_confidence,
                 "leagueId": league_id,
                 "leagueKey": league_context.get("leagueKey"),
                 "regionKey": league_context.get("regionKey"),
@@ -1291,32 +1334,78 @@ def infer_replay_dates(export_dir: Path):
 
     known_dates = [row["date"] for row in replay_dates.values() if row.get("date")]
     latest_known = max(known_dates) if known_dates else None
-    latest_patch = None
-    days_since_patch = None
-    if latest_known:
-        patch_dates = [event["date"] for event in schedule["patchEvents"] if event["date"] <= latest_known]
-        latest_patch = max(patch_dates) if patch_dates else None
-        if latest_patch:
-            try:
-                days_since_patch = (
-                    datetime.fromisoformat(latest_known) - datetime.fromisoformat(latest_patch)
-                ).days
-            except ValueError:
-                days_since_patch = None
+    latest_patch, days_since_patch = days_since_latest_patch(latest_known, schedule["patchEvents"])
+    confidence_counts = Counter(row.get("dateConfidence") or "none" for row in replay_dates.values())
+    source_counts = Counter(row.get("dateSource") or "unknown" for row in replay_dates.values())
 
     status.update(
         {
             "enabled": bool(replay_dates),
             "series": len(series),
             "assigned": assigned,
+            "tournamentSets": len(match_stats),
+            "tournamentAssigned": assigned,
             "unknown": max(0, len(match_stats) - assigned),
             "latestKnownDate": latest_known,
             "latestPatchDate": latest_patch,
             "daysSincePatch": days_since_patch,
-            "confidence": "high" if assigned else "none",
+            "confidence": "high" if confidence_counts.get("high") else "medium" if assigned else "none",
+            "confidenceCounts": dict(confidence_counts),
+            "assignedBySource": dict(source_counts),
         }
     )
     return replay_dates, status
+
+
+def merge_solo_replay_date_status(status, solo_matches):
+    merged = dict(status or {})
+    solo_matches = solo_matches or []
+    solo_total = len(solo_matches)
+    solo_assigned = sum(1 for row in solo_matches if row.get("dateConfidence") == "exported")
+    tournament_sets = int(merged.get("tournamentSets") or merged.get("sets") or 0)
+    tournament_assigned = int(merged.get("tournamentAssigned") or merged.get("assigned") or 0)
+    confidence_counts = Counter(merged.get("confidenceCounts") or {})
+    source_counts = Counter(merged.get("assignedBySource") or {})
+    for row in solo_matches:
+        if row.get("dateConfidence"):
+            confidence_counts[row.get("dateConfidence") or "none"] += 1
+        if row.get("dateSource") and row.get("dateSource") != "unknown":
+            source_counts[row.get("dateSource")] += 1
+
+    known_dates = [
+        value
+        for value in [merged.get("latestKnownDate")]
+        + [row.get("date") or row.get("dateKey") for row in solo_matches]
+        if value and value != "unknown"
+    ]
+    latest_known = max(known_dates) if known_dates else merged.get("latestKnownDate")
+    latest_patch, days_since_patch = days_since_latest_patch(latest_known, merged.get("patchEvents") or [])
+    merged.update(
+        {
+            "enabled": bool(tournament_assigned or solo_assigned),
+            "source": "match_stats + teams + year_schedules + solo_rank_matches",
+            "sets": tournament_sets + solo_total,
+            "tournamentSets": tournament_sets,
+            "soloSets": solo_total,
+            "assigned": tournament_assigned + solo_assigned,
+            "tournamentAssigned": tournament_assigned,
+            "soloAssigned": solo_assigned,
+            "unknown": max(0, (tournament_sets - tournament_assigned) + (solo_total - solo_assigned)),
+            "latestKnownDate": latest_known,
+            "latestPatchDate": latest_patch,
+            "daysSincePatch": days_since_patch,
+            "confidence": "exported"
+            if confidence_counts.get("exported")
+            else "high"
+            if confidence_counts.get("high")
+            else "medium"
+            if confidence_counts.get("medium")
+            else "none",
+            "confidenceCounts": dict(confidence_counts),
+            "assignedBySource": dict(source_counts),
+        }
+    )
+    return merged
 
 
 def extract_news_champion_stats(blob: bytes, champion_ids):
@@ -2343,21 +2432,28 @@ def parse_solo_team(team_text, champion_ids, item_catalog=None):
         champion = parse_quoted_field(block, "champion")
         if champion not in champion_ids:
             continue
+        athlete_id = parse_first_int(block, "athlete_id")
         item_icons = parse_quoted_array(block, "items")
         item_details = with_item_order(describe_item_icons(item_icons, item_catalog))
+        cs = parse_first_int(block, "cs") or 0
         players.append(
             {
                 "champion": champion,
                 "position": parse_position_from_stats(block),
+                "athleteId": athlete_id,
+                "name": f"athlete #{athlete_id}" if athlete_id is not None else None,
                 "kills": parse_first_int(block, "kill") or 0,
                 "deaths": parse_first_int(block, "death") or 0,
                 "assists": parse_first_int(block, "assist") or 0,
-                "cs": parse_first_int(block, "cs") or 0,
+                "cs": cs,
                 "level": parse_first_int(block, "level") or 0,
                 "dealt": parse_first_int(block, "dealing") or 0,
                 "healing": parse_first_int(block, "healing") or 0,
                 "taken": parse_first_int(block, "tanking") or 0,
                 "rating": parse_first_int(block, "rating") or 0,
+                "lineGold": 0,
+                "lineCs": cs,
+                "gold": 0,
                 "itemIcons": item_icons,
                 "itemIds": [item["id"] for item in item_details if item.get("id") is not None],
                 "itemNames": [item["name"] for item in item_details if item.get("name")],
@@ -2365,6 +2461,109 @@ def parse_solo_team(team_text, champion_ids, item_catalog=None):
             }
         )
     return players
+
+
+def compact_solo_performance(players):
+    players = players or []
+    return {
+        "gold": 0,
+        "killsTotal": sum(player.get("kills", 0) for player in players),
+        "deathsTotal": sum(player.get("deaths", 0) for player in players),
+        "epic": 0,
+        "serpen": 0,
+        "firstEpic": False,
+        "firstSerpen": False,
+        "lineGoldTotal": 0,
+        "lineCsTotal": sum(player.get("cs", 0) for player in players),
+        "dealtTotal": sum(player.get("dealt", 0) for player in players),
+    }
+
+
+def match_analysis_sort_key(match):
+    date_value = (
+        match.get("resultTime")
+        or match.get("dateTime")
+        or match.get("date")
+        or match.get("dateKey")
+        or ""
+    )
+    if str(date_value).lower() in {"unknown", "date not exported"}:
+        date_value = ""
+    raw_id = match.get("sourceId", match.get("id"))
+    try:
+        numeric_id = int(raw_id)
+    except (TypeError, ValueError):
+        numeric_match = re.search(r"\d+", str(raw_id))
+        numeric_id = int(numeric_match.group(0)) if numeric_match else 0
+    source_order = 1 if match.get("source") == "solo" else 0
+    return (str(date_value), source_order, numeric_id)
+
+
+def parse_solo_rank_match_analysis(path: Path, champion_ids, item_catalog=None, limit=None):
+    if not path.exists():
+        return []
+    text = path.read_text(encoding="utf-8", errors="ignore")
+    champion_ids = set(champion_ids)
+    matches = []
+    offset = 0
+    while True:
+        start = text.find("SoloRankMatch {", offset)
+        if start < 0:
+            break
+        open_at = text.find("{", start)
+        block, end = read_balanced(text, open_at)
+        if not block:
+            break
+        offset = end + 1
+        if "played: true" not in block:
+            continue
+
+        solo_id = parse_first_int(block, "id")
+        blue_win = parse_bool(block, "blue_team_win")
+        if solo_id is None or blue_win is None:
+            continue
+        blue_players = parse_solo_team(extract_named_array(block, "blue_team"), champion_ids, item_catalog)
+        red_players = parse_solo_team(extract_named_array(block, "red_team"), champion_ids, item_catalog)
+        if not blue_players or not red_players:
+            continue
+
+        region = region_context_from_id(parse_first_int(block, "region_id"))
+        date_value = parse_datetime_field(block, "date")
+        result_time = parse_datetime_field(block, "result_time")
+        date_key = date_key_from_datetime(date_value) or date_key_from_datetime(result_time)
+        date_label = f"{date_key} (솔랭 export)" if date_key else "date not exported"
+        blue = compact_solo_performance(blue_players)
+        red = compact_solo_performance(red_players)
+        blue.update({"name": "솔랭 블루", "bans": [], "players": blue_players})
+        red.update({"name": "솔랭 레드", "bans": [], "players": red_players})
+        matches.append(
+            {
+                "id": f"solo:{solo_id}",
+                "sourceId": solo_id,
+                "source": "solo",
+                "version": parse_version(block),
+                "date": date_key,
+                "dateTime": date_value,
+                "resultTime": result_time,
+                "dateKey": date_key or "unknown",
+                "dateLabel": date_label,
+                "dateSource": "solo_rank_match_exported" if date_key else "unknown",
+                "dateConfidence": "exported" if date_key else "none",
+                "regionKey": region.get("regionKey"),
+                "regionLabel": region.get("regionLabel"),
+                "competitionKind": "solo_rank",
+                "scheduleEvent": "SoloRankMatch",
+                "gameTick": None,
+                "durationSec": None,
+                "blueTeamId": None,
+                "redTeamId": None,
+                "winner": "blue" if blue_win else "red",
+                "blue": blue,
+                "red": red,
+            }
+        )
+    matches.sort(key=match_analysis_sort_key, reverse=True)
+    return matches if limit is None else matches[:limit]
 
 
 def parse_match_replay_relations(path: Path, champion_ids, excluded_replay_ids=None):
@@ -2586,6 +2785,7 @@ def parse_match_analysis(
         matches.append(
             {
                 "id": replay_id or len(matches),
+                "sourceId": replay_id or len(matches),
                 "source": "tournament",
                 "version": parse_version(block),
                 "date": date_info.get("date"),
@@ -2617,7 +2817,7 @@ def parse_match_analysis(
                 "red": red,
             }
         )
-    matches.sort(key=lambda row: row["id"], reverse=True)
+    matches.sort(key=match_analysis_sort_key, reverse=True)
     return matches if limit is None else matches[:limit]
 
 
@@ -3421,13 +3621,19 @@ def main():
                 "enabled": False,
                 "source": "disabled",
                 "sets": 0,
+                "tournamentSets": 0,
+                "soloSets": 0,
                 "series": 0,
                 "assigned": 0,
+                "tournamentAssigned": 0,
+                "soloAssigned": 0,
                 "unknown": 0,
                 "latestKnownDate": None,
                 "latestPatchDate": None,
                 "daysSincePatch": None,
                 "confidence": "none",
+                "confidenceCounts": {},
+                "assignedBySource": {},
                 "patchEvents": [],
             },
         )
@@ -3487,7 +3693,7 @@ def main():
             tournament_lane_synergies,
             tournament_lane_synergies_by_version,
         ) = parse_match_replay_relations(EXPORT_DIR / "match_replays.debug.txt", champion_ids, solo_replay_ids)
-        full_match_analysis = parse_match_analysis(
+        tournament_match_analysis = parse_match_analysis(
             EXPORT_DIR / "match_replays.debug.txt",
             champion_ids,
             save_lookup,
@@ -3498,7 +3704,19 @@ def main():
             team_meta=team_meta,
             league_meta=league_meta,
         )
-        tournament_splits = build_match_analysis_split_payload(champions, full_match_analysis, draft_scan, item_catalog)
+        solo_match_analysis = parse_solo_rank_match_analysis(
+            EXPORT_DIR / "solo_rank_matches.debug.txt",
+            champion_ids,
+            item_catalog=item_catalog,
+            limit=None,
+        )
+        replay_date_status = merge_solo_replay_date_status(replay_date_status, solo_match_analysis)
+        full_match_analysis = sorted(
+            tournament_match_analysis + solo_match_analysis,
+            key=match_analysis_sort_key,
+            reverse=True,
+        )
+        tournament_splits = build_match_analysis_split_payload(champions, tournament_match_analysis, draft_scan, item_catalog)
         match_analysis = full_match_analysis[:600]
     else:
         empty_rel = {"groups": 0, "pairs": {}, "counters": {}}
@@ -3523,6 +3741,8 @@ def main():
         tournament_relationships_by_version = {}
         tournament_lane_synergies = empty_lane_synergy_payload()
         tournament_lane_synergies_by_version = {}
+        tournament_match_analysis = []
+        solo_match_analysis = []
         full_match_analysis = []
         match_analysis = []
         tournament_splits = build_match_analysis_split_payload(champions, full_match_analysis, draft_scan, item_catalog)
@@ -3633,6 +3853,7 @@ def main():
         {"key": "league_regular", "label": "리그전"},
         {"key": "league_playoff", "label": "플레이오프"},
         {"key": "international", "label": "국제전"},
+        {"key": "solo_rank", "label": "솔로랭크"},
         {"key": "unknown", "label": "미확인"},
     ]
 
@@ -3655,6 +3876,9 @@ def main():
             "metaExportReason": meta_export_status["reason"],
             "replaySummaries": load_replay_summary_count(meta_export_status["usable"]),
             "matchAnalysis": len(match_analysis),
+            "matchAnalysisTotal": len(full_match_analysis),
+            "tournamentMatchAnalysis": len(tournament_match_analysis),
+            "soloMatchAnalysis": len(solo_match_analysis),
             "replayDateInference": replay_date_status,
             "soloRankMatches": solo_relationships.get("groups", 0),
             "tournamentRelationshipMatches": tournament_relationships.get("groups", 0),

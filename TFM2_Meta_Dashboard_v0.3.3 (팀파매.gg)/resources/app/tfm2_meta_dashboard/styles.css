@@ -378,6 +378,10 @@ tbody tr.active {
   color: #f7fafc;
 }
 
+.score-cell.honey-score {
+  color: #f6c768;
+}
+
 .muted {
   color: var(--muted);
 }
