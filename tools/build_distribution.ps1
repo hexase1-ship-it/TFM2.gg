@@ -53,6 +53,27 @@ function Get-DirectoryContentHash {
         [string]$Path
     )
 
+    $textExtensions = @(
+        ".bat",
+        ".cmd",
+        ".cjs",
+        ".css",
+        ".html",
+        ".i18n",
+        ".ini",
+        ".item_setting",
+        ".js",
+        ".json",
+        ".md",
+        ".mod_info",
+        ".ps1",
+        ".py",
+        ".txt",
+        ".tsv",
+        ".xml",
+        ".yaml",
+        ".yml"
+    )
     $basePath = (Resolve-Path -LiteralPath $Path).Path.TrimEnd("\") + "\"
     $lines = New-Object System.Collections.Generic.List[string]
     Get-ChildItem -LiteralPath $Path -Recurse -File -Force |
@@ -60,8 +81,20 @@ function Get-DirectoryContentHash {
         Sort-Object FullName |
         ForEach-Object {
             $relative = $_.FullName.Substring($basePath.Length).Replace("\", "/")
-            $hash = (Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
-            $lines.Add("$relative`t$($_.Length)`t$hash")
+            if ($textExtensions -contains $_.Extension.ToLowerInvariant()) {
+                $text = [System.IO.File]::ReadAllText($_.FullName, [System.Text.Encoding]::UTF8)
+                $text = $text.Replace("`r`n", "`n").Replace("`r", "`n")
+                $bytes = [System.Text.Encoding]::UTF8.GetBytes($text)
+            } else {
+                $bytes = [System.IO.File]::ReadAllBytes($_.FullName)
+            }
+            $fileSha = [System.Security.Cryptography.SHA256]::Create()
+            try {
+                $hash = ([System.BitConverter]::ToString($fileSha.ComputeHash($bytes))).Replace("-", "").ToLowerInvariant()
+            } finally {
+                $fileSha.Dispose()
+            }
+            $lines.Add("$relative`t$($bytes.Length)`t$hash")
         }
 
     $joined = [string]::Join("`n", $lines)
