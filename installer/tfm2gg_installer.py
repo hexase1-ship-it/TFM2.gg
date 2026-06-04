@@ -223,6 +223,22 @@ class InstallerModel:
             "expectedGameFiles": EXPECTED_GAME_FILES,
         }
 
+    def manifest_target_game_version(self) -> str:
+        return str(self.manifest.get("targetGameVersion") or "").strip()
+
+    def effective_target_game_version(self) -> str:
+        return TARGET_GAME_VERSION
+
+    def expected_game_files(self) -> dict:
+        manifest_expected = self.manifest.get("expectedGameFiles")
+        if (
+            self.manifest_target_game_version() == TARGET_GAME_VERSION
+            and isinstance(manifest_expected, dict)
+            and manifest_expected
+        ):
+            return manifest_expected
+        return EXPECTED_GAME_FILES
+
     def save_config(self, game_dir: Path) -> None:
         self.config["gameDir"] = str(game_dir)
         write_json(self.config_path, self.config)
@@ -376,7 +392,8 @@ class InstallerModel:
             checks.append(ComponentStatus(False, "게임 경로", "TeamfightManager2.exe를 찾지 못했습니다."))
             return ComponentStatus(False, "미감지", "게임 설치 경로를 확인하세요."), checks
 
-        expected = self.manifest.get("expectedGameFiles") or EXPECTED_GAME_FILES
+        target_version = self.effective_target_game_version()
+        expected = self.expected_game_files()
         size_matches = 0
         size_checked = 0
         for name, expected_size in expected.items():
@@ -388,7 +405,7 @@ class InstallerModel:
             actual = file_path.stat().st_size
             if int(actual) == int(expected_size):
                 size_matches += 1
-                checks.append(ComponentStatus(True, name, "0.4.8 기준 파일 크기 일치"))
+                checks.append(ComponentStatus(True, name, f"{target_version} 기준 파일 크기 일치"))
             else:
                 checks.append(
                     ComponentStatus(
@@ -410,12 +427,12 @@ class InstallerModel:
         )
 
         if size_checked and size_matches == size_checked:
-            main = ComponentStatus(True, "호환", f"Teamfight Manager 2 {TARGET_GAME_VERSION} 기준과 일치")
+            main = ComponentStatus(True, "호환", f"Teamfight Manager 2 {target_version} 기준과 일치")
         elif size_checked:
             main = ComponentStatus(
                 False,
                 "주의",
-                f"설치는 가능하지만 {TARGET_GAME_VERSION} 기준 파일과 완전히 일치하지 않습니다.",
+                f"Teamfight Manager 2 {target_version}용 설치 도구입니다. 게임 파일 크기가 일부 달라 Steam 업데이트/무결성 확인을 권장합니다.",
             )
         else:
             main = ComponentStatus(False, "부적합", "필수 게임 파일이 없어 자동 설치가 안전하지 않습니다.")
