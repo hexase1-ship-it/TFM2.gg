@@ -357,6 +357,23 @@ function rateWithCount(rate, count) {
   return `${rate}% (${fmt(count)})`;
 }
 
+function banRateDisplayLabel() {
+  return state.role === "all" ? "밴률" : "밴률 (전체)";
+}
+
+function banRateDisplayTitle() {
+  return state.role === "all" ? "" : "밴은 역할 의도를 구분할 수 없어 현재 범위 전체 기준으로 표시됩니다.";
+}
+
+function banRateDisplayForChampion(championId, roleScopedStat = null) {
+  const stat = state.role === "all" ? roleScopedStat || statOf(championId) : statOf(championId);
+  return {
+    rate: stat?.banRate,
+    count: stat?.banCount,
+    title: banRateDisplayTitle(),
+  };
+}
+
 function tierRank(tier) {
   return { OP: 0, "1": 1, "2": 2, "3": 3, "4": 4, "-": 9 }[tier || "-"] ?? 9;
 }
@@ -1384,6 +1401,11 @@ function renderControls() {
   renderButtonGroup("scopeTabs", scopes, "scope", "scope-btn");
   renderButtonGroup("roleTabs", roles, "role", "role-btn");
   renderButtonGroup("sideRoles", roles, "role", "role-btn");
+  const banRateHeader = document.getElementById("banRateHeader");
+  if (banRateHeader) {
+    banRateHeader.textContent = banRateDisplayLabel();
+    banRateHeader.title = banRateDisplayTitle();
+  }
   const patchSelect = document.getElementById("patchSelect");
   patchSelect.innerHTML = patches
     .map(([value, label]) => `<option value="${value}" ${state.patch === value ? "selected" : ""}>${label}</option>`)
@@ -1581,6 +1603,7 @@ function renderRows(champs) {
       const stat = displayStatOf(champ.id);
       const tierInfo = metaTierInfo(stat);
       const honeyInfo = honeyScoreInfo(stat);
+      const banDisplay = banRateDisplayForChampion(champ.id, stat);
       const tier = tierInfo.tier;
       return `
         <tr class="${state.selected === champ.id ? "active" : ""}" data-row="${champ.id}">
@@ -1592,7 +1615,7 @@ function renderRows(champs) {
           <td>${state.role === "all" ? roleLabel(bestRole(champ)) : roleLabel(state.role)}</td>
           <td>${pct(stat.winRate)}</td>
           <td>${rateWithCount(stat.pickRate, stat.pickCount)}</td>
-          <td>${rateWithCount(stat.banRate, stat.banCount)}</td>
+          <td title="${banDisplay.title}">${rateWithCount(banDisplay.rate, banDisplay.count)}</td>
           <td>${pct(stat.banPickRate)}</td>
           <td><span class="source-pill">${sourceLabel(stat.source)}</span></td>
         </tr>`;
@@ -2236,6 +2259,7 @@ function renderChampionMetricRow(stat) {
   const games = Number(stat.pickCount || 0);
   const tierInfo = metaTierInfo(stat);
   const honeyInfo = honeyScoreInfo(stat);
+  const banDisplay = banRateDisplayForChampion(stat.championId, stat);
   return `<div class="metric-row">
     <div class="metric"><span>메타 스코어</span><strong title="${scoreTitle(tierInfo)}">${scoreLabel(tierInfo)}</strong></div>
     <div class="metric"><span>꿀챔 점수</span><strong title="${honeyScoreTitle(honeyInfo)}">${honeyScoreLabel(honeyInfo)}</strong></div>
@@ -2244,7 +2268,7 @@ function renderChampionMetricRow(stat) {
     <div class="metric"><span>K/D/A</span><strong>${fmt(stat.kills)} / ${fmt(stat.deaths)} / ${fmt(stat.assists)}</strong></div>
     <div class="metric"><span>평균 K/D</span><strong>${perGame(stat.kills, games)} / ${perGame(stat.deaths, games)}</strong></div>
     <div class="metric"><span>픽률</span><strong>${rateWithCount(stat.pickRate, stat.pickCount)}</strong></div>
-    <div class="metric"><span>밴률</span><strong>${rateWithCount(stat.banRate, stat.banCount)}</strong></div>
+    <div class="metric" title="${banDisplay.title}"><span>${banRateDisplayLabel()}</span><strong>${rateWithCount(banDisplay.rate, banDisplay.count)}</strong></div>
     <div class="metric"><span>밴픽률</span><strong>${pct(stat.banPickRate)}</strong></div>
   </div>`;
 }

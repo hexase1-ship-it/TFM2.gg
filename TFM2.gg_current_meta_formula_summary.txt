@@ -1,0 +1,769 @@
+TFM2.gg current meta formula summary
+Generated for: current dashboard / policy logic
+
+This document summarizes the currently applied logic for:
+1. meta data aggregation
+2. meta score
+3. meta tier
+4. honey score
+5. addon policy TSV exports
+
+The canonical implementation is split across:
+- TFM2_Meta_Dashboard_v0.3.3 (팀파매.gg)/resources/app/tfm2_meta_dashboard/tools/build_meta_data.py
+- TFM2_Meta_Dashboard_v0.3.3 (팀파매.gg)/resources/app/tfm2_meta_dashboard/app.js
+- TFM2_Meta_Dashboard_v0.3.3 (팀파매.gg)/resources/app/tfm2_meta_dashboard/data/score-model-spec.json
+
+
+1. Meta Data Aggregation
+========================
+
+1.1. Main scopes
+----------------
+
+The dashboard can calculate stats under these scopes:
+
+- overall: tournament + solo rank combined
+- tournament: tournament/replay/export data only
+- solo: solo rank export data only
+
+The UI can also filter by:
+
+- patch
+- role
+- tournament split / region / division where available
+
+The selected scope/filter controls the stat row used by the later meta score,
+meta tier, and honey score calculations.
+
+
+1.2. Per-champion base fields
+-----------------------------
+
+For a champion:
+
+- pickCount = number of picked games
+- wins = number of wins while picked
+- losses = pickCount - wins
+- winRate = wins / pickCount * 100
+- banCount = number of bans, tournament side only
+- pickRate = pickCount / totalMatch * 100
+- banRate = banCount / banOpportunityMatchCount * 100
+- banPickRate = (pickCount + banCount) / totalMatch * 100
+
+In overall scope:
+
+- totalMatch = tournament_total + solo_total
+- pickCount = tournament_picks + solo_picks
+- wins = tournament_wins + solo_wins
+- losses = tournament_losses + solo_losses
+- banCount = tournament_bans only
+- winRate = wins / pickCount * 100
+- pickRate = pickCount / totalMatch * 100
+- banRate = tournament_bans / tournament_total * 100
+- banPickRate = (pickCount + tournament_bans) / totalMatch * 100
+
+Solo rank has no ban data. It contributes picks/wins/losses/pick rate, but does
+not directly create ban pressure.
+
+
+1.3. Source counters
+--------------------
+
+The current model preserves source counters for more stable exposure math:
+
+- sourceMatchCounts[source] = source match opportunity count
+- sourcePickCounts[source] = champion pick count in that source
+- sourceBanCounts[source] = champion ban count in that source
+
+Typical sources:
+
+- tournament
+- solo
+- role
+
+For role-filtered views:
+
+- pickCount = role matches
+- wins = role wins
+- winRate = role wins / role matches * 100
+- pickRate = role matches / total role opportunities * 100
+- banRate = null
+- sourceMatchCounts = { role: total_role_opportunities }
+- sourcePickCounts = { role: role_matches }
+- sourceBanCounts = { role: 0 }
+
+Role views intentionally treat ban data as unavailable for the role-specific
+presence calculation.
+
+
+2. Sample Mode
+==============
+
+All meta scoring first checks whether a champion has enough pick samples.
+
+Manual modes:
+
+- early: minSample = 5
+- normal: minSample = 10
+
+Auto mode:
+
+- If daysSincePatch is known:
+  - daysSincePatch >= 3: minSample = 10
+  - daysSincePatch < 3: minSample = 5
+
+- If daysSincePatch is unknown:
+  - scoped match volume >= 100: minSample = 10
+  - scoped match volume < 100: minSample = 5
+
+Scoped match volume:
+
+- all roles: max(totalMatch, totalPickCount / 10)
+- specific role: sum(byPosition[role].matches)
+
+If pickCount < minSample or winRate is missing:
+
+- eligible = false
+- meta tier = "-"
+- meta score = null
+- honey score = null
+
+
+3. Win Rate Posterior
+=====================
+
+The model does not use raw win rate directly. It first estimates a Bayesian
+posterior win rate so low-sample champions are pulled toward the current field
+average.
+
+
+3.1. Prior mean
+---------------
+
+For the current selected stat rows:
+
+priorMean = totalWins / totalPicks
+
+If there are no valid picks:
+
+priorMean = fallbackPriorMean = 0.5
+
+Then:
+
+priorMean is clamped to [0.001, 0.999]
+
+
+3.2. Prior strength kappa
+-------------------------
+
+For each champion with valid picks:
+
+rate_i = wins_i / picks_i
+
+observedVar = sample variance of rate_i
+noiseVar = average(priorMean * (1 - priorMean) / picks_i)
+betweenVar = max(observedVar - noiseVar, 0.0005)
+
+kappa = priorMean * (1 - priorMean) / betweenVar - 1
+
+Then kappa is clamped by mode:
+
+- early: [8, 50]
+- normal: [12, 80]
+- role: [18, 100]
+
+If fewer than 2 valid champion rows exist:
+
+kappa = clamp(24, modeLow, modeHigh)
+
+
+3.3. Beta posterior
+-------------------
+
+For the champion:
+
+trials = pickCount
+successes = wins
+
+alpha = successes + priorMean * kappa
+beta = max(0.001, trials - successes) + (1 - priorMean) * kappa
+total = alpha + beta
+
+posteriorMean = alpha / total
+posteriorSd = sqrt(alpha * beta / (total^2 * (total + 1)))
+posteriorLower = clamp(posteriorMean - z * posteriorSd, 0, 1)
+
+Current z:
+
+z = 0.84
+
+This is a conservative lower estimate, roughly an 80 percent one-sided style
+confidence adjustment rather than a harsh 95 percent lower bound.
+
+
+4. Strength Score
+=================
+
+The pure strength part is:
+
+strengthScore =
+  100 * (0.7 * posteriorMean + 0.3 * posteriorLower)
+
+strengthLower =
+  100 * posteriorLower
+
+Interpretation:
+
+- strengthScore = normal pure champion strength estimate
+- strengthLower = conservative floor used for tier ranking
+
+
+5. Exposure / Draft Pressure
+============================
+
+The current model treats pick/ban presence as draft pressure. It does not simply
+add pickRate + banRate. It first normalizes per source.
+
+
+5.1. Source baseline presence
+-----------------------------
+
+For each source:
+
+pickBase_source = totalSourcePicks / totalSourceMatches
+
+If source has ban data:
+
+banBase_source = totalSourceBans / totalSourceMatches
+presenceBase_source = 1 - (1 - pickBase_source) * (1 - banBase_source)
+
+If source has no ban data, such as solo or role:
+
+presenceBase_source = pickBase_source
+
+Then global baseline presence is weighted by source match counts:
+
+baselinePresence =
+  sum(presenceBase_source * totalSourceMatches) / sum(totalSourceMatches)
+
+Fallback baseline if no source counter exists:
+
+- pickBase = 0.1
+- banBase = 0.05
+- baselinePresence = 0.145
+
+
+5.2. Champion source-normalized presence
+----------------------------------------
+
+For each source and champion:
+
+pickPost_source =
+  (sourcePicks + pickBase_source * ratePriorKappa)
+  / (sourceMatches + ratePriorKappa)
+
+Current ratePriorKappa:
+
+ratePriorKappa = 20
+
+If source has ban data:
+
+banPost_source =
+  (sourceBans + banBase_source * ratePriorKappa)
+  / (sourceMatches + ratePriorKappa)
+
+presence_source =
+  1 - (1 - pickPost_source) * (1 - banPost_source)
+
+If source has no ban data:
+
+presence_source = pickPost_source
+
+Final champion presence:
+
+presence =
+  sum(presence_source * sourceMatches) / sum(sourceMatches)
+
+If no source counters exist, fallback is:
+
+presence = 1 - (1 - pickRate) * (1 - banRate)
+
+If banRate is missing:
+
+presence = pickRate
+
+
+5.3. Draft pressure score
+-------------------------
+
+draftPressureScore =
+  clamp(50 + pressureScale * ln((presence + eps) / (baselinePresence + eps)), 0, 100)
+
+Current parameters:
+
+- eps = 0.001
+- pressureScale = 16
+
+Interpretation:
+
+- 50 means average exposure for the current filter
+- above 50 means the champion is picked/banned more than expected
+- below 50 means the champion is picked/banned less than expected
+
+
+6. Meta Score
+=============
+
+Meta score combines:
+
+- strengthScore
+- draftPressureScore
+
+The selected preset controls the weights.
+
+
+6.1. Classic
+------------
+
+metaScore =
+  0.84 * strengthScore
+  + 0.16 * draftPressureScore
+
+metaLower =
+  0.88 * strengthLower
+  + 0.12 * draftPressureScore
+
+
+6.2. Fearless
+-------------
+
+metaScore =
+  0.78 * strengthScore
+  + 0.22 * draftPressureScore
+
+metaLower =
+  0.82 * strengthLower
+  + 0.18 * draftPressureScore
+
+
+6.3. Hard Fearless
+------------------
+
+metaScore =
+  0.72 * strengthScore
+  + 0.28 * draftPressureScore
+
+metaLower =
+  0.78 * strengthLower
+  + 0.22 * draftPressureScore
+
+
+6.4. Reliability display
+------------------------
+
+The dashboard also calculates a reliability display value:
+
+reliability =
+  sqrt(pickCount / (pickCount + minSample * 2))
+
+Displayed reliability:
+
+reliabilityPercent = reliability * 100
+
+This value is also reused by honey score.
+
+
+7. Meta Tier
+============
+
+Meta tier is not a direct raw score cutoff. It is a conservative rank-based
+tier assignment using metaLower.
+
+
+7.1. Eligible sorting
+---------------------
+
+Eligible champions are sorted by:
+
+1. metaLower descending
+2. metaScore descending
+3. winRate descending
+4. pickCount descending
+5. championName ascending
+
+
+7.2. Percentile
+---------------
+
+For a sorted eligible champion:
+
+percentile = rank / eligibleCount
+
+The code uses:
+
+percentile = (index + 1) / eligibleCount
+
+So the best champion has percentile close to 1 / eligibleCount.
+
+
+7.3. Tier thresholds
+--------------------
+
+The first matching rule wins:
+
+OP:
+  metaLower >= 56
+  and percentile <= 0.08
+
+1 tier:
+  metaLower >= 51
+  and percentile <= 0.22
+
+2 tier:
+  metaLower >= 48
+  and percentile <= 0.45
+
+3 tier:
+  metaLower >= 44
+  and percentile <= 0.70
+
+4 tier:
+  any eligible champion not matching the above
+
+-:
+  not eligible because winRate is missing or pickCount < minSample
+
+Important:
+
+The old generated field called "tier" in raw meta-data still exists as a
+legacy/simple win-rate field in some payloads, but the dashboard's visible
+"메타 티어" is recalculated in app.js from the v1 score model described above.
+
+
+8. Honey Score
+==============
+
+Honey score is a signed "strength minus exposure" indicator.
+
+Purpose:
+
+- Positive honey score:
+  The champion looks stronger than its current pick/ban exposure.
+  In other words, potentially underused or undervalued.
+
+- Negative honey score:
+  The champion is exposed more than its pure strength suggests.
+  In other words, potentially overpicked or overbanned.
+
+- Near zero:
+  Strength and exposure are roughly aligned for the current filter.
+
+Honey score is not a replacement for meta score. It answers a different
+question:
+
+- metaScore = how good / pressured the champion is
+- honeyScore = how hidden or overexposed the champion is relative to strength
+
+
+8.1. Valid rows
+---------------
+
+Honey score is calculated only for entries that are:
+
+- eligible
+- have finite strengthScore
+- have finite presence
+
+Otherwise:
+
+honeyScore = null
+
+
+8.2. Exposure expectation regression
+------------------------------------
+
+For all valid champions in the current filter:
+
+X = strengthScore
+Y = presencePercent
+
+meanX = average(X)
+meanY = average(Y)
+varX = sum((X - meanX)^2)
+covXY = sum((X - meanX) * (Y - meanY))
+
+slope = max(0, covXY / varX) if varX > 0
+slope = 0 if varX == 0
+
+intercept = meanY - slope * meanX
+
+For each champion:
+
+expectedPresence =
+  clamp(
+    intercept + slope * strengthScore,
+    baselinePresence * 50,
+    max(5, maxPresence)
+  )
+
+Notes:
+
+- presence is stored/displayed in percent units here.
+- baselinePresence comes from the earlier exposure context and is originally a
+  0..1 fraction, so baselinePresence * 50 becomes a small percent floor.
+- maxPresence is the highest actual presence among valid champions.
+
+
+8.3. Residual
+-------------
+
+residual =
+  expectedPresence - actualPresence
+
+Meaning:
+
+- residual > 0:
+  Actual exposure is lower than expected from strength.
+  This pushes honey score positive.
+
+- residual < 0:
+  Actual exposure is higher than expected from strength.
+  This pushes honey score negative.
+
+
+8.4. Adaptive residual divisor
+------------------------------
+
+Base divisor:
+
+baseResidualDivisor = 20
+
+The model collects all non-zero absolute residuals:
+
+absResiduals = abs(residual) where residual != 0
+
+adaptiveResidual = quantile(absResiduals, 0.75)
+
+If adaptiveResidual exists:
+
+adaptiveResidualDivisor =
+  clamp(adaptiveResidual * 1.25, 3, 20)
+
+If not:
+
+adaptiveResidualDivisor = 20
+
+Current parameters:
+
+- residualDivisor = 20
+- adaptiveResidualMinDivisor = 3
+- adaptiveResidualQuantile = 0.75
+- adaptiveResidualScale = 1.25
+
+This keeps role/region/small-scope honey score from being crushed by a divisor
+that is too large for the current stat range.
+
+
+8.5. Percentile gap
+-------------------
+
+The model also computes percentile ranks among valid champions:
+
+strengthPercentile = percentile rank of strengthScore, 0..1
+exposurePercentile = percentile rank of actual presence, 0..1
+
+Ties receive the average percentile of the tied block.
+
+rankGap =
+  strengthPercentile - exposurePercentile
+
+Meaning:
+
+- rankGap > 0: strength rank is higher than exposure rank
+- rankGap < 0: exposure rank is higher than strength rank
+
+
+8.6. Residual gap
+-----------------
+
+residualGap =
+  clamp(residual / adaptiveResidualDivisor, -1, 1)
+
+
+8.7. Signed honey score
+-----------------------
+
+Current weights:
+
+- rankGapWeight = 0.72
+- residualGapWeight = 0.28
+
+totalWeight =
+  rankGapWeight + residualGapWeight
+
+signedHoneyScore =
+  clamp(
+    100 * reliability * (
+      (rankGapWeight / totalWeight) * rankGap
+      + (residualGapWeight / totalWeight) * residualGap
+    ),
+    -100,
+    100
+  )
+
+With current weights, because totalWeight is 1.0:
+
+signedHoneyScore =
+  clamp(
+    100 * reliability * (0.72 * rankGap + 0.28 * residualGap),
+    -100,
+    100
+  )
+
+Displayed value:
+
+- rounded to 1 decimal
+- positive values show with a "+" prefix
+- tiny values with absolute value < 0.05 display as 0.0
+
+Display classification:
+
+- honeyScore > 0.05: positive / underexposed candidate
+- honeyScore < -0.05: negative / overexposed candidate
+- otherwise: neutral
+
+
+9. Policy TSV Exports for Addons
+================================
+
+The dashboard also exports TSV files for native addon mods.
+
+Important:
+
+The TSV "overall" column is intentionally not always the raw dashboard meta
+score. It has separate meanings per addon.
+
+
+9.1. Dashboard tier to in-game tier mapping
+-------------------------------------------
+
+Dashboard meta tier maps to native in-game S/A/B/C/D:
+
+- OP -> S
+- 1 -> A
+- 2 -> B
+- 3 -> C
+- 4 -> D
+- - -> C
+
+
+9.2. Meta Champion Tiers addon
+------------------------------
+
+File:
+
+- champion_tier_policy.tsv
+
+Purpose:
+
+- show stable in-game S/A/B/C/D tier labels
+
+Overall semantic:
+
+- tier anchor for the native tier addon
+- not raw dashboard meta score
+
+Anchors:
+
+- S = 90.0
+- A = 75.0
+- B = 62.0
+- C = 50.0
+- D = 35.0
+
+If not eligible:
+
+- C / 50.0
+
+Reason:
+
+The native tier addon can reinterpret "overall" using its own S/A/B/C/D
+thresholds. Using raw dashboard meta score would often collapse many champions
+into C/D because raw meta scores are conservative. The anchor values make the
+native addon display the intended tier.
+
+
+9.3. AI Banpick Policy addon
+----------------------------
+
+File:
+
+- ai_champion_policy.tsv
+
+Purpose:
+
+- feed a scaled score into AI draft-score bias
+
+Base by policy tier:
+
+- S = 80.0
+- A = 70.0
+- B = 60.0
+- C = 50.0
+- D = 40.0
+
+Additional deltas:
+
+scoreDelta =
+  clamp((metaScore - 50) / 10, -1, 1) * 2
+
+lowerDelta =
+  clamp((metaLower - 50) / 10, -1, 1)
+
+aiOverall =
+  round1(clamp(base + scoreDelta + lowerDelta, 20, 80))
+
+Native addon bias formula:
+
+draftBias =
+  clamp((aiOverall - 50) / 20, -1.5, 1.5)
+
+Approximate effect:
+
+- aiOverall 80 -> +1.5 draft score bias
+- aiOverall 70 -> +1.0 draft score bias
+- aiOverall 60 -> +0.5 draft score bias
+- aiOverall 50 -> 0.0 draft score bias
+- aiOverall 40 -> -0.5 draft score bias
+
+
+10. Practical Interpretation
+============================
+
+Meta score:
+
+- Best single number for "how good / meta-relevant this champion currently is."
+- Uses posterior win strength plus pick/ban pressure.
+- Conservative against tiny samples.
+
+Meta tier:
+
+- Best label for tier-list style reading.
+- Uses conservative metaLower plus rank percentile gates.
+- Prevents too many champions from becoming OP/1/2 just because absolute scores
+  are close.
+
+Honey score:
+
+- Best number for "good relative to how much it is noticed."
+- Positive does not always mean the champion is better than an OP champion.
+- Negative does not always mean the champion is bad.
+- It means exposure is high compared with the champion's strength signal.
+
+Addon policy overall:
+
+- champion_tier_policy.tsv overall = in-game tier display anchor
+- ai_champion_policy.tsv overall = AI draft bias input
+- Neither should be read as the raw dashboard meta score without checking
+  PolicyKind / OverallSemantic comments at the top of the TSV.
+
