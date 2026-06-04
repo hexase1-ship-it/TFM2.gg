@@ -1,47 +1,50 @@
 # AUTO_GENERATED_BY_TFM2_META_DASHBOARD
 # Do not hand-edit unless you intentionally want to override dashboard meta scoring.
-# Generated: 2026-06-04T23:55:25
+# Generated: 2026-06-05T00:56:03
 # Save: C:\Users\hexas\AppData\Roaming\TeamSamoyed\TeamfightManager2\data\save_20260604_200353.data
 # Source: overall patch 2026.3.0
 # Patch: 2026.3.0
-# Preset: classic weights={"ban": 0.2, "pick": 0.2, "win": 1.0}
+# Model: tfm2gg-meta-v1
+# Preset: classic weights={"draftPressure": 0.16, "lowerPressure": 0.12, "lowerStrength": 0.88, "strength": 0.84}
 # Sample: normal min=10 reason=48 days since patch
+# WinPrior: mean=50.0 kappa=59.7
+# BaselinePresence: 30.3
 # Format: champion_id<TAB>tier<TAB>overall
 # Non-eligible or low-sample champions are emitted as neutral C/50.0 so native AI keeps its base score.
 # champion_id	tier	overall
-swordman	B	49.4
-guardian_spirit	B	48.6
-siege_breaker	B	48.0
-executioner	C	46.9
-inquisitor	C	46.1
-barrier_magician	C	45.3
-fighter	C	45.3
-dancer	C	44.8
-gunner	C	44.7
-priest	C	44.0
-soldier	C	43.6
-ice_mage	C	43.5
-dokkaebi	C	43.2
-berserker	D	42.9
-jiangshi	D	42.8
-bard	D	41.6
-shadowmancer	D	41.3
-spirit_caller	D	41.1
-magic_knight	D	41.0
-pythoness	D	40.8
-lightning_mage	D	40.7
-druid	D	40.3
-ghost	D	40.0
-boomerang_hunter	D	38.2
-demon	D	37.5
-plague_doctor	D	37.0
-illusionist	D	36.4
-whip_master	D	36.2
-knight	D	35.1
-prisoner	D	32.8
-pole_warrior	D	32.2
-ogre	D	24.5
-hammerer	D	14.1
+guardian_spirit	A	55.8
+swordman	A	55.2
+executioner	A	54.2
+gunner	A	53.8
+inquisitor	A	53.4
+fighter	A	52.7
+barrier_magician	B	52.3
+ice_mage	B	52.1
+soldier	B	51.9
+priest	B	51.0
+dokkaebi	B	50.3
+spirit_caller	B	50.1
+jiangshi	B	50.1
+shadowmancer	B	50.0
+berserker	C	49.9
+ghost	C	49.4
+druid	C	49.1
+lightning_mage	C	48.7
+bard	C	48.6
+magic_knight	C	48.6
+boomerang_hunter	C	47.9
+pythoness	C	47.9
+demon	C	47.4
+plague_doctor	D	46.9
+siege_breaker	D	46.9
+whip_master	D	45.9
+knight	D	45.3
+dancer	D	45.0
+illusionist	D	44.6
+prisoner	D	44.4
+pole_warrior	D	43.3
+ogre	D	41.1
+hammerer	D	38.7
 hitman	C	50.0
 vampire	C	50.0
 dark_mage	C	50.0

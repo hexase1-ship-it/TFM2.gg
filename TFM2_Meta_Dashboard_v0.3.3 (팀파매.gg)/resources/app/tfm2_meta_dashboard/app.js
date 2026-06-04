@@ -44,6 +44,30 @@ const sampleModes = [
 ];
 
 const tierPresetById = Object.fromEntries(tierPresets.map(([id, label, weights]) => [id, { id, label, weights }]));
+const DEFAULT_SCORE_MODEL_SPEC = {
+  modelVersion: "tfm2gg-meta-v1",
+  posterior: {
+    z: 0.84,
+    fallbackPriorMean: 0.5,
+    kappa: { early: [8, 50], normal: [12, 80], role: [18, 100] },
+    ratePriorKappa: 20,
+  },
+  strength: { meanWeight: 0.7, lowerWeight: 0.3 },
+  pressure: { eps: 0.001, scale: 16 },
+  presets: {
+    classic: { label: "classic", metaStrengthWeight: 0.84, metaPressureWeight: 0.16, lowerStrengthWeight: 0.88, lowerPressureWeight: 0.12 },
+    fearless: { label: "fearless", metaStrengthWeight: 0.78, metaPressureWeight: 0.22, lowerStrengthWeight: 0.82, lowerPressureWeight: 0.18 },
+    hardFearless: { label: "hardFearless", metaStrengthWeight: 0.72, metaPressureWeight: 0.28, lowerStrengthWeight: 0.78, lowerPressureWeight: 0.22 },
+  },
+  tiers: [
+    { tier: "OP", minLower: 56, maxPercentile: 0.08 },
+    { tier: "1", minLower: 51, maxPercentile: 0.22 },
+    { tier: "2", minLower: 48, maxPercentile: 0.45 },
+    { tier: "3", minLower: 44, maxPercentile: 0.7 },
+  ],
+  honey: { strengthGateStart: 50, strengthGateSpan: 15, residualDivisor: 20, residualExponent: 0.75, strengthGateExponent: 0.75 },
+};
+const scoreModelSpec = DATA.scoreModelSpec || DEFAULT_SCORE_MODEL_SPEC;
 
 function readStoredSetting(key, fallback, allowed) {
   try {
@@ -84,7 +108,6 @@ const roleLabels = Object.fromEntries(roles);
 const scopeLabels = Object.fromEntries(scopes);
 const leagueMeta = DATA.leagueMeta || {};
 let metaTierCache = null;
-let honeyScoreCache = null;
 
 function splitPayloadForScope(scope = state.scope) {
   if (scope === "overall") return DATA.combinedSplits || {};
@@ -269,7 +292,7 @@ function displayStatOf(id) {
   const wins = Number(roleRow.wins || 0);
   const total = roleTotalMatches();
   const pickRate = total ? Math.round((matches / total) * 1000) / 10 : null;
-  const banRate = stat.banRate ?? null;
+  const banRate = null;
   return {
     ...stat,
     championId: id,
@@ -280,7 +303,12 @@ function displayStatOf(id) {
     pickRate,
     banCount: stat.banCount ?? null,
     banRate,
-    banPickRate: pickRate !== null && banRate !== null ? Math.round((pickRate + banRate) * 10) / 10 : null,
+    banPickRate: pickRate,
+    pickOpportunities: total,
+    banOpportunities: null,
+    sourceMatchCounts: { role: total },
+    sourcePickCounts: { role: matches },
+    sourceBanCounts: { role: 0 },
     dealt: roleRow.dealing ?? roleRow.dealt ?? 0,
     taken: roleRow.tanking ?? roleRow.taken ?? 0,
     healing: roleRow.healing ?? 0,
@@ -344,6 +372,156 @@ function currentTierPreset() {
   return tierPresetById[state.tierPreset] || tierPresetById.classic;
 }
 
+function currentModelPreset() {
+  return scoreModelSpec.presets?.[state.tierPreset] || scoreModelSpec.presets?.classic || DEFAULT_SCORE_MODEL_SPEC.presets.classic;
+}
+
+function finiteNumber(value, fallback = NaN) {
+  const number = Number(value);
+  return Number.isFinite(number) ? number : fallback;
+}
+
+function betaPosterior(successes, trials, priorMean, kappa, z) {
+  const safeTrials = Math.max(0, Math.round(Number(trials || 0)));
+  const safeSuccesses = clamp(Number(successes || 0), 0, safeTrials);
+  const safePrior = clamp(Number(priorMean || 0.5), 0.001, 0.999);
+  const safeKappa = Math.max(0.01, Number(kappa || 0.01));
+  const alpha = safeSuccesses + safePrior * safeKappa;
+  const beta = Math.max(0.001, safeTrials - safeSuccesses) + (1 - safePrior) * safeKappa;
+  const total = alpha + beta;
+  const mean = alpha / total;
+  const sd = Math.sqrt((alpha * beta) / (total * total * (total + 1)));
+  return { mean, sd, lower: clamp(mean - Number(z || 0.84) * sd, 0, 1) };
+}
+
+function betaRateMean(successes, trials, priorMean, kappa) {
+  const safeTrials = Math.max(0, Math.round(Number(trials || 0)));
+  const safeSuccesses = clamp(Number(successes || 0), 0, safeTrials);
+  const safePrior = clamp(Number(priorMean || 0.5), 0.001, 0.999);
+  const safeKappa = Math.max(0.01, Number(kappa || 0.01));
+  return (safeSuccesses + safePrior * safeKappa) / (safeTrials + safeKappa);
+}
+
+function kappaBounds(sampleInfo, roleScoped = state.role !== "all") {
+  const groups = scoreModelSpec.posterior?.kappa || {};
+  const key = roleScoped ? "role" : sampleInfo.mode || "normal";
+  return groups[key] || groups.normal || [12, 80];
+}
+
+function estimateWinPrior(rows, sampleInfo) {
+  const candidates = [];
+  let totalWins = 0;
+  let totalPicks = 0;
+  for (const row of rows) {
+    const stat = row.stat || row;
+    const picks = Math.max(0, Number(stat.pickCount || 0));
+    const winRate = finiteNumber(stat.winRate);
+    let wins = finiteNumber(stat.wins);
+    if (!Number.isFinite(wins) && Number.isFinite(winRate)) {
+      wins = picks * winRate / 100;
+    }
+    if (!picks || !Number.isFinite(wins)) continue;
+    wins = clamp(wins, 0, picks);
+    totalWins += wins;
+    totalPicks += picks;
+    candidates.push({ picks, rate: wins / picks });
+  }
+  const fallback = Number(scoreModelSpec.posterior?.fallbackPriorMean || 0.5);
+  const mean = clamp(totalPicks ? totalWins / totalPicks : fallback, 0.001, 0.999);
+  const [low, high] = kappaBounds(sampleInfo);
+  if (candidates.length < 2) {
+    return { mean, kappa: clamp(24, low, high) };
+  }
+  const observedVar = candidates.reduce((sum, row) => sum + Math.pow(row.rate - mean, 2), 0) / Math.max(1, candidates.length - 1);
+  const noiseVar = candidates.reduce((sum, row) => sum + mean * (1 - mean) / Math.max(1, row.picks), 0) / candidates.length;
+  const betweenVar = Math.max(observedVar - noiseVar, 0.0005);
+  const kappa = mean * (1 - mean) / betweenVar - 1;
+  return { mean, kappa: clamp(kappa, low, high) };
+}
+
+function sourceCounter(stat, field) {
+  const value = stat?.[field];
+  return value && typeof value === "object" && !Array.isArray(value) ? value : {};
+}
+
+function estimateExposureBaseline(rows) {
+  const totals = {};
+  const picks = {};
+  const bans = {};
+  for (const row of rows) {
+    const stat = row.stat || row;
+    const sourceMatches = sourceCounter(stat, "sourceMatchCounts");
+    const sourcePicks = sourceCounter(stat, "sourcePickCounts");
+    const sourceBans = sourceCounter(stat, "sourceBanCounts");
+    for (const [source, totalRaw] of Object.entries(sourceMatches)) {
+      const total = Number(totalRaw || 0);
+      if (!(total > 0)) continue;
+      totals[source] = (totals[source] || 0) + total;
+      picks[source] = (picks[source] || 0) + Number(sourcePicks[source] || 0);
+      bans[source] = (bans[source] || 0) + Number(sourceBans[source] || 0);
+    }
+  }
+  const bySource = {};
+  for (const [source, total] of Object.entries(totals)) {
+    const pick = clamp((picks[source] || 0) / total, 0.001, 0.999);
+    const ban = source === "solo" || source === "role" ? null : clamp((bans[source] || 0) / total, 0.001, 0.999);
+    const presence = source === "solo" || source === "role" ? pick : 1 - (1 - pick) * (1 - (ban || 0));
+    bySource[source] = { pick, ban, presence: clamp(presence, 0.001, 0.999) };
+  }
+  if (!Object.keys(bySource).length) {
+    bySource.overall = { pick: 0.1, ban: 0.05, presence: 0.145 };
+  }
+  const totalWeight = Object.values(totals).reduce((sum, value) => sum + value, 0) || 1;
+  const presence =
+    Object.entries(bySource).reduce((sum, [source, row]) => sum + row.presence * (totals[source] || 0), 0) / totalWeight ||
+    bySource.overall?.presence ||
+    0.145;
+  return { bySource, presence: clamp(presence, 0.001, 0.999) };
+}
+
+function buildScoreModelContext(rows, sampleInfo) {
+  return {
+    winPrior: estimateWinPrior(rows, sampleInfo),
+    exposure: estimateExposureBaseline(rows),
+  };
+}
+
+function sourceNormalizedPresence(stat, context) {
+  const rateKappa = Number(scoreModelSpec.posterior?.ratePriorKappa || 20);
+  const sourceMatches = sourceCounter(stat, "sourceMatchCounts");
+  const sourcePicks = sourceCounter(stat, "sourcePickCounts");
+  const sourceBans = sourceCounter(stat, "sourceBanCounts");
+  const baselines = context.exposure?.bySource || {};
+  if (Object.keys(sourceMatches).length) {
+    let weighted = 0;
+    let totalWeight = 0;
+    let noBanData = false;
+    for (const [source, totalRaw] of Object.entries(sourceMatches)) {
+      const total = Number(totalRaw || 0);
+      if (!(total > 0)) continue;
+      const baseline = baselines[source] || baselines.overall || { pick: 0.1, ban: 0.05 };
+      const pickPost = betaRateMean(sourcePicks[source], total, baseline.pick || 0.1, rateKappa);
+      let presence = pickPost;
+      if (source === "solo" || source === "role") {
+        noBanData = true;
+      } else {
+        const banPost = betaRateMean(sourceBans[source], total, baseline.ban || 0.05, rateKappa);
+        presence = 1 - (1 - pickPost) * (1 - banPost);
+      }
+      weighted += presence * total;
+      totalWeight += total;
+    }
+    if (totalWeight) {
+      return { presence: clamp(weighted / totalWeight, 0, 1), noBanData };
+    }
+  }
+  const pickRate = clamp(Number(stat?.pickRate || 0) / 100, 0, 1);
+  const banRateRaw = finiteNumber(stat?.banRate);
+  if (!Number.isFinite(banRateRaw)) return { presence: pickRate, noBanData: true };
+  const banRate = clamp(banRateRaw / 100, 0, 1);
+  return { presence: clamp(1 - (1 - pickRate) * (1 - banRate), 0, 1), noBanData: false };
+}
+
 function replayDateInferenceInfo() {
   return DATA.replayDateInference || DATA.sources?.replayDateInference || {};
 }
@@ -402,9 +580,9 @@ function effectiveSampleInfo() {
     : { minSample: 5, mode: "early", label: "자동: 초반 5픽", reason: `${fmt(matchCount)}경기` };
 }
 
-function metaScoreForStat(stat, sampleInfo = effectiveSampleInfo()) {
+function metaScoreForStat(stat, sampleInfo = effectiveSampleInfo(), context = null) {
   const preset = currentTierPreset();
-  const weights = preset.weights;
+  const modelPreset = currentModelPreset();
   const sample = Number(stat.pickCount || 0);
   const rawWinRate = Number(stat.winRate);
   const minSample = sampleInfo.minSample;
@@ -413,6 +591,9 @@ function metaScoreForStat(stat, sampleInfo = effectiveSampleInfo()) {
       eligible: false,
       tier: "-",
       score: null,
+      metaLower: null,
+      strengthScore: null,
+      draftPressureScore: null,
       sample,
       minSample,
       preset: preset.label,
@@ -420,40 +601,73 @@ function metaScoreForStat(stat, sampleInfo = effectiveSampleInfo()) {
     };
   }
 
-  const pickRate = clamp(Number(stat.pickRate || 0), 0, 100);
-  const banRate = clamp(Number(stat.banRate || 0), 0, 100);
-  const confidence = clamp(sample / Math.max(minSample * 2, 12), 0, 1);
-  const adjustedWinRate = round1(50 + (rawWinRate - 50) * confidence);
-  const totalWeight = weights.win + weights.pick + weights.ban;
-  const weighted =
-    (adjustedWinRate * weights.win + pickRate * weights.pick + banRate * weights.ban) /
-    Math.max(0.01, totalWeight);
-  const lowWinPenalty = Math.max(0, 45 - rawWinRate) * 0.8;
-  const score = round1(clamp(weighted - lowWinPenalty, 0, 100));
+  const scoreContext = context || buildScoreModelContext([{ stat }], sampleInfo);
+  const wins = Number.isFinite(Number(stat.wins)) ? Number(stat.wins) : sample * rawWinRate / 100;
+  const posterior = betaPosterior(
+    wins,
+    sample,
+    scoreContext.winPrior?.mean ?? 0.5,
+    scoreContext.winPrior?.kappa ?? 24,
+    scoreModelSpec.posterior?.z ?? 0.84
+  );
+  const strengthSpec = scoreModelSpec.strength || {};
+  const strengthScore = 100 * (
+    Number(strengthSpec.meanWeight ?? 0.7) * posterior.mean +
+    Number(strengthSpec.lowerWeight ?? 0.3) * posterior.lower
+  );
+  const strengthLower = 100 * posterior.lower;
+  const exposure = sourceNormalizedPresence(stat, scoreContext);
+  const baselinePresence = scoreContext.exposure?.presence || 0.145;
+  const pressureSpec = scoreModelSpec.pressure || {};
+  const eps = Number(pressureSpec.eps || 0.001);
+  const scale = Number(pressureSpec.scale || 16);
+  const draftPressureScore = clamp(50 + scale * Math.log((exposure.presence + eps) / (baselinePresence + eps)), 0, 100);
+  const score = clamp(
+    Number(modelPreset.metaStrengthWeight ?? 0.78) * strengthScore +
+      Number(modelPreset.metaPressureWeight ?? 0.22) * draftPressureScore,
+    0,
+    100
+  );
+  const metaLower = clamp(
+    Number(modelPreset.lowerStrengthWeight ?? 0.82) * strengthLower +
+      Number(modelPreset.lowerPressureWeight ?? 0.18) * draftPressureScore,
+    0,
+    100
+  );
+  const reliability = Math.sqrt(sample / Math.max(1, sample + minSample * 2));
 
   return {
     eligible: true,
     tier: "4",
-    score,
+    score: round1(score),
+    metaLower: round1(metaLower),
+    strengthScore: round1(strengthScore),
+    strengthLower: round1(strengthLower),
+    draftPressureScore: round1(draftPressureScore),
+    presence: round1(exposure.presence * 100),
+    baselinePresence: round1(baselinePresence * 100),
+    reliability: round1(reliability * 100),
+    noBanData: Boolean(exposure.noBanData),
     sample,
     minSample,
     preset: preset.label,
     winRate: rawWinRate,
-    adjustedWinRate,
-    pickRate,
-    banRate,
-    weights,
-    lowWinPenalty: round1(lowWinPenalty),
+    posteriorMean: round1(posterior.mean * 100),
+    posteriorLower: round1(posterior.lower * 100),
+    posteriorSd: round1(posterior.sd * 100),
+    priorMean: round1((scoreContext.winPrior?.mean ?? 0.5) * 100),
+    priorKappa: round1(scoreContext.winPrior?.kappa ?? 0),
   };
 }
 
 function tierForMetaRank(entry, index, total) {
-  if (!entry.eligible || entry.score === null || !total) return "-";
+  if (!entry.eligible || entry.metaLower === null || !total) return "-";
   const percentile = (index + 1) / total;
-  if (entry.score >= 58 && percentile <= 0.08) return "OP";
-  if (entry.score >= 52 && percentile <= 0.22) return "1";
-  if (entry.score >= 48 && percentile <= 0.45) return "2";
-  if (entry.score >= 43 && percentile <= 0.7) return "3";
+  for (const row of scoreModelSpec.tiers || DEFAULT_SCORE_MODEL_SPEC.tiers) {
+    if (entry.metaLower >= Number(row.minLower || 0) && percentile <= Number(row.maxPercentile || 1)) {
+      return row.tier || "4";
+    }
+  }
   return "4";
 }
 
@@ -464,22 +678,29 @@ function metaTierCacheKey() {
 function buildMetaTierCache() {
   const sampleInfo = effectiveSampleInfo();
   const map = new Map();
-  const rows = DATA.champions.map((champ) => {
-    const stat = displayStatOf(champ.id);
-    const entry = {
-      championId: champ.id,
-      championName: champ.name,
-      ...metaScoreForStat(stat, sampleInfo),
+  const rows = DATA.champions.map((champ) => ({
+    championId: champ.id,
+    championName: champ.name,
+    stat: displayStatOf(champ.id),
+  }));
+  const context = buildScoreModelContext(rows, sampleInfo);
+  for (const row of rows) {
+    const stat = row.stat;
+    row.entry = {
+      championId: row.championId,
+      championName: row.championName,
+      ...metaScoreForStat(stat, sampleInfo, context),
       winRate: stat.winRate,
       pickCount: Number(stat.pickCount || 0),
     };
-    map.set(champ.id, entry);
-    return entry;
-  });
+    map.set(row.championId, row.entry);
+  }
   const eligible = rows
+    .map((row) => row.entry)
     .filter((entry) => entry.eligible)
     .sort(
       (a, b) =>
+        Number(b.metaLower || -1) - Number(a.metaLower || -1) ||
         Number(b.score || -1) - Number(a.score || -1) ||
         Number(b.winRate || -1) - Number(a.winRate || -1) ||
         Number(b.pickCount || 0) - Number(a.pickCount || 0) ||
@@ -490,7 +711,8 @@ function buildMetaTierCache() {
     entry.eligibleCount = eligible.length;
     entry.tier = tierForMetaRank(entry, index, eligible.length);
   });
-  metaTierCache = { key: metaTierCacheKey(), map, sampleInfo, eligibleCount: eligible.length };
+  assignHoneyScores(rows.map((row) => row.entry), context, sampleInfo);
+  metaTierCache = { key: metaTierCacheKey(), map, sampleInfo, eligibleCount: eligible.length, context };
   return metaTierCache;
 }
 
@@ -499,119 +721,75 @@ function metaTierInfo(stat) {
     buildMetaTierCache();
   }
   if (!stat?.championId) {
-    return metaScoreForStat(stat || {}, metaTierCache.sampleInfo);
+    return metaScoreForStat(stat || {}, metaTierCache.sampleInfo, metaTierCache.context);
   }
-  return metaTierCache.map.get(stat.championId) || metaScoreForStat(stat, metaTierCache.sampleInfo);
+  return metaTierCache.map.get(stat.championId) || metaScoreForStat(stat, metaTierCache.sampleInfo, metaTierCache.context);
 }
 
-function pureStrengthForStat(stat, sampleInfo = effectiveSampleInfo()) {
-  const sample = Number(stat.pickCount || 0);
-  const rawWinRate = Number(stat.winRate);
-  const minSample = sampleInfo.minSample;
-  if (!Number.isFinite(rawWinRate) || sample < minSample) {
-    return {
-      eligible: false,
-      score: null,
-      sample,
-      minSample,
-      reason: !Number.isFinite(rawWinRate) ? "승률 없음" : `표본 ${sample}/${minSample}`,
+function assignHoneyScores(entries, context, sampleInfo) {
+  const valid = entries.filter(
+    (entry) =>
+      entry.eligible &&
+      Number.isFinite(Number(entry.strengthScore)) &&
+      Number.isFinite(Number(entry.presence))
+  );
+  const honeySpec = scoreModelSpec.honey || DEFAULT_SCORE_MODEL_SPEC.honey;
+  if (!valid.length) {
+    for (const entry of entries) {
+      entry.honey = { eligible: false, score: null, reason: entry.reason || "표본 부족" };
+    }
+    return;
+  }
+  const meanX = valid.reduce((sum, entry) => sum + Number(entry.strengthScore || 0), 0) / valid.length;
+  const meanY = valid.reduce((sum, entry) => sum + Number(entry.presence || 0), 0) / valid.length;
+  const varX = valid.reduce((sum, entry) => sum + Math.pow(Number(entry.strengthScore || 0) - meanX, 2), 0);
+  const covXY = valid.reduce(
+    (sum, entry) => sum + (Number(entry.strengthScore || 0) - meanX) * (Number(entry.presence || 0) - meanY),
+    0
+  );
+  const slope = varX > 0 ? Math.max(0, covXY / varX) : 0;
+  const intercept = meanY - slope * meanX;
+  const maxPresence = Math.max(...valid.map((entry) => Number(entry.presence || 0)), context.exposure?.presence || 0.1);
+  for (const entry of entries) {
+    if (!entry.eligible) {
+      entry.honey = { eligible: false, score: null, reason: entry.reason || "표본 부족" };
+      continue;
+    }
+    const expectedPresence = clamp(intercept + slope * Number(entry.strengthScore || 0), (context.exposure?.presence || 0.1) * 50, Math.max(5, maxPresence));
+    const residual = Math.max(0, expectedPresence - Number(entry.presence || 0));
+    const strengthGate = clamp(
+      (Number(entry.strengthScore || 0) - Number(honeySpec.strengthGateStart || 50)) / Math.max(1, Number(honeySpec.strengthGateSpan || 15)),
+      0,
+      1
+    );
+    const reliability = Math.sqrt(Number(entry.sample || 0) / Math.max(1, Number(entry.sample || 0) + Number(sampleInfo.minSample || 5) * 2));
+    const residualFactor = clamp(residual / Math.max(1, Number(honeySpec.residualDivisor || 20)), 0, 1);
+    const score = 100 *
+      Math.pow(residualFactor, Number(honeySpec.residualExponent || 0.75)) *
+      Math.pow(strengthGate, Number(honeySpec.strengthGateExponent || 0.75)) *
+      reliability;
+    entry.honey = {
+      eligible: true,
+      score: round1(clamp(score, 0, 100)),
+      strengthScore: entry.strengthScore,
+      exposureRate: entry.presence,
+      expectedExposure: round1(expectedPresence),
+      hiddenGap: round1(residual),
+      reliability: round1(reliability * 100),
+      sample: entry.sample,
+      minSample: entry.minSample,
     };
   }
-  const confidence = clamp(sample / Math.max(minSample * 2, 12), 0, 1);
-  const adjustedWinRate = round1(50 + (rawWinRate - 50) * confidence);
-  const lowWinPenalty = Math.max(0, 45 - rawWinRate) * 0.6;
-  const score = round1(clamp(adjustedWinRate - lowWinPenalty, 0, 100));
-  return {
-    eligible: true,
-    score,
-    sample,
-    minSample,
-    winRate: rawWinRate,
-    adjustedWinRate,
-    lowWinPenalty: round1(lowWinPenalty),
-  };
-}
-
-function exposureRateForStat(stat) {
-  const pickRate = clamp(Number(stat.pickRate || 0), 0, 100);
-  const banRate = clamp(Number(stat.banRate || 0), 0, 100);
-  const banPickRate = Number(stat.banPickRate);
-  if (state.scope === "solo" || String(stat.source || "").includes("solo_rank")) {
-    return pickRate;
-  }
-  if (Number.isFinite(banPickRate)) {
-    return clamp(banPickRate, 0, 100);
-  }
-  return clamp(pickRate + banRate, 0, 100);
-}
-
-function assignPercentile(rows, field, target) {
-  const valid = rows.filter((row) => Number.isFinite(row[field]));
-  if (!valid.length) return;
-  valid
-    .sort((a, b) => Number(a[field]) - Number(b[field]) || a.championName.localeCompare(b.championName, "ko"))
-    .forEach((row, index) => {
-      row[target] = valid.length === 1 ? 1 : (index + 1) / valid.length;
-    });
-}
-
-function honeyScoreCacheKey() {
-  return metaTierCacheKey();
-}
-
-function buildHoneyScoreCache() {
-  const sampleInfo = effectiveSampleInfo();
-  const map = new Map();
-  const rows = DATA.champions.map((champ) => {
-    const stat = displayStatOf(champ.id);
-    const strength = pureStrengthForStat(stat, sampleInfo);
-    const exposureRate = exposureRateForStat(stat);
-    const entry = {
-      championId: champ.id,
-      championName: champ.name,
-      eligible: strength.eligible,
-      score: null,
-      strengthScore: strength.score,
-      exposureRate,
-      sample: strength.sample,
-      minSample: strength.minSample,
-      reason: strength.reason,
-      adjustedWinRate: strength.adjustedWinRate,
-      winRate: strength.winRate,
-      pickRate: Number(stat.pickRate || 0),
-      banRate: Number(stat.banRate || 0),
-    };
-    map.set(champ.id, entry);
-    return entry;
-  });
-  assignPercentile(rows.filter((row) => row.eligible), "strengthScore", "strengthRank");
-  assignPercentile(rows.filter((row) => row.eligible), "exposureRate", "exposureRank");
-  for (const entry of rows) {
-    if (!entry.eligible) continue;
-    const strengthRank = Number(entry.strengthRank || 0);
-    const exposureRank = Number(entry.exposureRank || 0);
-    const hiddenGap = Math.max(0, strengthRank - exposureRank);
-    const reliability = Math.sqrt(entry.sample / Math.max(1, entry.sample + entry.minSample * 2));
-    const strongEnough = Number(entry.strengthScore || 0) >= 50;
-    entry.hiddenGap = round1(hiddenGap * 100);
-    entry.reliability = round1(reliability * 100);
-    entry.score = strongEnough
-      ? round1(clamp(100 * Math.pow(hiddenGap, 0.75) * Math.pow(strengthRank, 1.15) * reliability, 0, 100))
-      : 0;
-  }
-  honeyScoreCache = { key: honeyScoreCacheKey(), map, sampleInfo };
-  return honeyScoreCache;
 }
 
 function honeyScoreInfo(stat) {
-  if (!honeyScoreCache || honeyScoreCache.key !== honeyScoreCacheKey()) {
-    buildHoneyScoreCache();
+  if (!metaTierCache || metaTierCache.key !== metaTierCacheKey()) {
+    buildMetaTierCache();
   }
   if (!stat?.championId) {
-    const strength = pureStrengthForStat(stat || {}, honeyScoreCache.sampleInfo);
-    return { eligible: false, score: null, reason: strength.reason };
+    return { eligible: false, score: null, reason: "표본 부족" };
   }
-  return honeyScoreCache.map.get(stat.championId) || { eligible: false, score: null, reason: "표본 부족" };
+  return metaTierCache.map.get(stat.championId)?.honey || { eligible: false, score: null, reason: "표본 부족" };
 }
 
 function displayTier(stat) {
@@ -633,10 +811,14 @@ function scoreTitle(info) {
     return info?.reason || "표본 부족";
   }
   return [
-    `${info.preset} 점수 ${scoreLabel(info)}`,
-    `보정 승률 ${info.adjustedWinRate}%`,
-    `픽률 ${info.pickRate}%`,
-    `밴률 ${info.banRate}%`,
+    `${info.preset} 메타 스코어 ${scoreLabel(info)}`,
+    `하한 점수 ${info.metaLower ?? "-"}`,
+    `순수 강도 ${info.strengthScore ?? "-"}`,
+    `승률 posterior ${info.posteriorMean ?? "-"}%`,
+    `하한 승률 ${info.posteriorLower ?? "-"}%`,
+    `드래프트 압박 ${info.draftPressureScore ?? "-"}`,
+    `노출도 ${info.presence ?? "-"}%`,
+    `신뢰도 ${info.reliability ?? "-"}%`,
     `표본 ${info.sample}/${info.minSample}`,
   ].join(" · ");
 }
@@ -653,6 +835,7 @@ function honeyScoreTitle(info) {
     `꿀챔 점수 ${honeyScoreLabel(info)}`,
     `순수 강도 ${info.strengthScore?.toFixed?.(1) ?? "-"}`,
     `노출도 ${round1(info.exposureRate || 0)}%`,
+    `기대 노출도 ${info.expectedExposure ?? "-"}%`,
     `숨은 정도 ${info.hiddenGap ?? 0}%`,
     `신뢰도 ${info.reliability ?? 0}%`,
     `표본 ${info.sample}/${info.minSample}`,
@@ -712,6 +895,7 @@ function compareChampions(a, b) {
   if (state.sort === "tier") {
     return (
       tierRank(am.tier) - tierRank(bm.tier) ||
+      Number(bm.metaLower ?? -1) - Number(am.metaLower ?? -1) ||
       Number(bm.score ?? -1) - Number(am.score ?? -1) ||
       Number(bs.winRate || -1) - Number(as.winRate || -1) ||
       Number(bs.pickCount || 0) - Number(as.pickCount || 0) ||
