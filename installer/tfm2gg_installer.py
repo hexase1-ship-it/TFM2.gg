@@ -142,6 +142,11 @@ ADDON_PACKAGES = (
 ADDON_BY_ID = {addon.mod_id: addon for addon in ADDON_PACKAGES}
 CORE_ADDON_IDS = (MOD_ID,)
 POLICY_TIER_SORT = {"S": 5, "A": 4, "B": 3, "C": 2, "D": 1}
+ADDON_WORKSHOP_SHADOW_IDS = {
+    MOD_ID: "3999000102",
+    META_TIER_MOD_ID: "3999000101",
+    AI_BANPICK_MOD_ID: "3999000103",
+}
 
 
 def is_frozen() -> bool:
@@ -543,6 +548,15 @@ class InstallerModel:
                 dirs.append(candidate)
         return dirs
 
+    def workshop_shadow_dir(self, game_dir: Path, addon: AddonPackage) -> Path | None:
+        shadow_id = ADDON_WORKSHOP_SHADOW_IDS.get(addon.mod_id)
+        if not shadow_id:
+            return None
+        dirs = self.workshop_content_dirs(game_dir)
+        if not dirs:
+            return None
+        return dirs[0] / shadow_id
+
     def mods_config_path(self, game_dir: Path) -> Path:
         return game_dir / "config" / "game" / "mods.json"
 
@@ -709,14 +723,16 @@ class InstallerModel:
         generated = len(plan.get("generatedIds") or [])
         missing = len(plan.get("missingAfterOrder") or [])
         override_count = len(plan.get("overrideMods") or [])
+        patched = len(plan.get("patchedMods") or [])
         if plan.get("installed"):
-            tail = "마지막 로드" if plan.get("loadLast") else "순서 확인 필요"
-            return f"적용됨 {generated}개 / override {override_count}개 / 유실 {missing}개 / {tail}"
+            if patched:
+                return f"workshop merge applied {generated} / patched {patched} / missing {missing}"
+            return f"ready {generated} / override {override_count} / missing {missing}"
         if plan.get("shouldInstall"):
-            return f"필요 {generated}개 / override {override_count}개 / 유실 {missing}개"
+            return f"patch needed {generated} / override {override_count} / missing {missing}"
         if generated:
-            return f"불필요 {generated}개 / override {override_count}개 / 유실 {missing}개"
-        return "불필요"
+            return f"ready {generated} / override {override_count} / missing {missing}"
+        return "none"
 
     def sync_champion_view_compat(self, game_dir: Path, force: bool = False) -> dict:
         plan = self.build_champion_view_compat_plan(game_dir)
@@ -730,10 +746,53 @@ class InstallerModel:
             raise RuntimeError("Teamfight Manager 2 is running. Close the game before changing champion mod compatibility files.")
 
         compat_dir = self.champion_view_compat_dir(game_dir)
-        self.backup_existing(game_dir, [compat_dir])
+        if compat_dir.exists():
+            self.backup_existing(game_dir, [compat_dir])
+        previous_manifest = read_json(compat_dir / "tfm2gg_compat_manifest.json", {})
         if compat_dir.exists():
             remove_known_path(game_dir, compat_dir)
-        (compat_dir / "style").mkdir(parents=True, exist_ok=True)
+        compat_dir.mkdir(parents=True, exist_ok=True)
+
+        active_mods = set(plan.get("activeMods") or [])
+        active_by_id = {
+            row.mod_id: row
+            for row in self.discover_workshop_champion_mods(game_dir)
+            if row.mod_id in active_mods
+        }
+        previous_backups = {
+            str(record.get("modId")): record
+            for record in (previous_manifest.get("workshopOverrideBackups") or [])
+            if isinstance(record, dict)
+        }
+
+        patched_mods: list[str] = []
+        patch_records: list[dict] = []
+        stamp = time.strftime("%Y%m%d_%H%M%S")
+        for mod_id in plan.get("overrideMods") or []:
+            row = active_by_id.get(mod_id)
+            if not row:
+                continue
+            override_path = row.path / "mod.override_info"
+            override_info = read_json(override_path, {})
+            if not isinstance(override_info, dict):
+                continue
+            entry = override_info.get(CHAMPION_VIEW_ASSET_KEY)
+            if not isinstance(entry, dict) or str(entry.get("type") or "").strip().lower() != "override":
+                continue
+            backup_text = str(previous_backups.get(mod_id, {}).get("backupPath") or "")
+            backup_path = Path(backup_text) if backup_text else Path()
+            if not backup_text or not backup_path.exists():
+                backup_path = override_path.with_name(f"{override_path.name}.tfm2gg_override_backup_{stamp}")
+                shutil.copy2(override_path, backup_path)
+            entry["type"] = "merge"
+            write_json(override_path, override_info)
+            patched_mods.append(mod_id)
+            patch_records.append({
+                "modId": mod_id,
+                "workshopId": row.workshop_id,
+                "path": str(override_path),
+                "backupPath": str(backup_path),
+            })
 
         mod_info = {
             "id": CHAMPION_VIEW_COMPAT_MOD_ID,
@@ -742,20 +801,16 @@ class InstallerModel:
             "author": "TFM2.gg",
             "version": "0.1.0",
             "last_updated": time.strftime("%Y-%m-%d"),
-            "description": "Generated local merge layer that restores champion_view entries lost by workshop override collisions.",
+            "description": "Generated metadata for workshop champion_view merge compatibility patches.",
             "dependencies": [{"mod_id": "base", "version": f">={TARGET_GAME_VERSION}"}],
-        }
-        override_info = {
-            CHAMPION_VIEW_ASSET_KEY: {
-                "remapping": CHAMPION_VIEW_COMPAT_REMAP,
-                "type": "merge",
-            }
         }
         manifest = {
             "generatedAt": time.strftime("%Y-%m-%dT%H:%M:%S"),
             "activeMods": plan.get("activeMods") or [],
             "overrideMods": plan.get("overrideMods") or [],
             "mergeMods": plan.get("mergeMods") or [],
+            "patchedMods": patched_mods,
+            "workshopOverrideBackups": patch_records,
             "generatedIds": plan.get("generatedIds") or [],
             "missingAfterOrder": plan.get("missingAfterOrder") or [],
             "missingStyleIds": plan.get("missingStyleIds") or [],
@@ -763,21 +818,28 @@ class InstallerModel:
         }
 
         write_json(compat_dir / "mod.mod_info", mod_info)
-        write_json(compat_dir / "mod.override_info", override_info)
-        write_json(compat_dir / "style" / "champion_view.champion_view", {"entries": plan["entries"]})
         write_json(compat_dir / "tfm2gg_compat_manifest.json", manifest)
-
-        config = self.read_mods_config(game_dir)
-        enabled_mods = [str(item) for item in config.get("enabled_mods", []) if str(item) != CHAMPION_VIEW_COMPAT_MOD_ID]
-        enabled_mods.append(CHAMPION_VIEW_COMPAT_MOD_ID)
-        config["enabled_mods"] = enabled_mods
-        self.write_mods_config(game_dir, config)
-        return self.build_champion_view_compat_plan(game_dir)
+        updated = self.build_champion_view_compat_plan(game_dir)
+        updated["installed"] = bool(patched_mods) or not updated.get("conflictRisk")
+        updated["patchedMods"] = patched_mods
+        return updated
 
     def remove_champion_view_compat(self, game_dir: Path) -> None:
         if self.is_game_running():
             raise RuntimeError("Teamfight Manager 2 is running. Close the game before removing champion mod compatibility files.")
         compat_dir = self.champion_view_compat_dir(game_dir)
+        manifest = read_json(compat_dir / "tfm2gg_compat_manifest.json", {})
+        for record in manifest.get("workshopOverrideBackups") or []:
+            if not isinstance(record, dict):
+                continue
+            path_text = str(record.get("path") or "")
+            backup_text = str(record.get("backupPath") or "")
+            if not path_text or not backup_text:
+                continue
+            path = Path(path_text)
+            backup_path = Path(backup_text)
+            if path.exists() and backup_path.exists():
+                shutil.copy2(backup_path, path)
         self.backup_existing(game_dir, [compat_dir])
         if compat_dir.exists():
             remove_known_path(game_dir, compat_dir)
@@ -994,6 +1056,24 @@ class InstallerModel:
         copy_dir(self.addon_payload(source_root, addon), addon_dst)
         self.write_policy_addon_config(game_dir, addon, addon_dst)
 
+        shadow_dst = self.workshop_shadow_dir(game_dir, addon)
+        if shadow_dst:
+            if shadow_dst.exists():
+                shutil.rmtree(shadow_dst)
+            copy_dir(addon_dst, shadow_dst)
+            self.write_policy_addon_config(game_dir, addon, shadow_dst)
+
+        config = self.read_mods_config(game_dir)
+        enabled_mods = [str(item) for item in config.get("enabled_mods", [])]
+        if addon.mod_id not in enabled_mods:
+            enabled_mods.append(addon.mod_id)
+        accepted = [str(item) for item in config.get("accepted_code_mod_warnings", [])]
+        if addon.mod_id not in accepted:
+            accepted.append(addon.mod_id)
+        config["enabled_mods"] = enabled_mods
+        config["accepted_code_mod_warnings"] = accepted
+        self.write_mods_config(game_dir, config)
+
     def install_addons(self, game_dir: Path, addon_ids: tuple[str, ...], source_root: Path | None = None) -> None:
         for addon_id in addon_ids:
             self.install_addon(game_dir, source_root, addon_id)
@@ -1026,10 +1106,17 @@ class InstallerModel:
         for target in targets:
             if target.exists():
                 remove_known_path(game_dir, target)
+        for addon in ADDON_PACKAGES:
+            shadow = self.workshop_shadow_dir(game_dir, addon)
+            if shadow and shadow.exists():
+                shutil.rmtree(shadow)
         self.remove_empty_legacy_dirs(game_dir)
         config = self.read_mods_config(game_dir)
-        enabled_mods = [str(item) for item in config.get("enabled_mods", []) if str(item) != CHAMPION_VIEW_COMPAT_MOD_ID]
+        remove_ids = {CHAMPION_VIEW_COMPAT_MOD_ID, *[addon.mod_id for addon in ADDON_PACKAGES]}
+        enabled_mods = [str(item) for item in config.get("enabled_mods", []) if str(item) not in remove_ids]
+        accepted = [str(item) for item in config.get("accepted_code_mod_warnings", []) if str(item) not in remove_ids]
         config["enabled_mods"] = enabled_mods
+        config["accepted_code_mod_warnings"] = accepted
         self.write_mods_config(game_dir, config)
 
     def migrate_legacy_dashboard(self, game_dir: Path) -> None:
