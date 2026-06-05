@@ -2,7 +2,8 @@ param(
     [string]$SavePath = "",
     [switch]$NoPrompt,
     [switch]$OpenDashboard,
-    [switch]$SkipLiveExporter
+    [switch]$SkipLiveExporter,
+    [switch]$PolicyOnly
 )
 
 $ErrorActionPreference = "Stop"
@@ -429,6 +430,33 @@ if (-not $runner) {
     Write-Host "Download: https://www.python.org/downloads/windows/"
     Read-Host "Press Enter to exit"
     exit 1
+}
+
+if ($PolicyOnly) {
+    $header = @(
+        "TFM2 Meta Dashboard policy-only refresh log",
+        "Time: $(Get-Date -Format s)",
+        "Script: $scriptDir",
+        "Game root: $env:TFM2_GAME_ROOT",
+        "Python: $runner $($runnerArgs -join ' ')",
+        "Python probe:",
+        ($pythonProbeLog -join [Environment]::NewLine),
+        "Policy preset: $env:TFM2_POLICY_PRESET",
+        ""
+    )
+    $header | Set-Content -LiteralPath $logPath -Encoding UTF8
+    try {
+        $result = Invoke-CapturedNative $runner ($runnerArgs + @($builder, "--policy-only"))
+        $result.Output | Out-File -LiteralPath $logPath -Append -Encoding UTF8
+        if ($result.ExitCode -ne 0) {
+            throw "policy-only refresh failed with exit $($result.ExitCode)"
+        }
+        Write-Host "Addon policy files refreshed."
+        exit 0
+    } catch {
+        $_ | Out-File -LiteralPath $logPath -Append -Encoding UTF8
+        Write-FailAndExit "Addon policy refresh failed." 1
+    }
 }
 
 $saveFiles = @(Get-CandidateSaveFiles)

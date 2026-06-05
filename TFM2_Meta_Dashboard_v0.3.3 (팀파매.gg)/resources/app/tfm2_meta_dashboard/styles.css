@@ -107,7 +107,7 @@ select {
 .nav-shell {
   display: grid;
   gap: 10px;
-  width: min(920px, 100%);
+  width: 100%;
 }
 
 .nav-row {
@@ -255,23 +255,182 @@ h1 {
 
 .toolbar {
   margin-top: 18px;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
   align-items: start;
-  gap: 18px;
+  gap: 10px;
 }
 
 .toolbar .select {
-  width: 220px;
+  width: 100%;
 }
 
 .filter-stack {
   display: grid;
+  grid-template-columns:
+    minmax(120px, 0.8fr)
+    minmax(120px, 0.8fr)
+    minmax(238px, 1.25fr)
+    minmax(120px, 0.8fr)
+    minmax(148px, 0.95fr)
+    minmax(112px, 0.7fr);
+  align-items: stretch;
   gap: 8px;
-  min-width: 220px;
+  width: 100%;
+}
+
+.addon-policy-control {
+  display: grid;
+  grid-template-columns: minmax(150px, 1fr) 58px;
+  grid-template-rows: 38px 16px;
+  align-items: center;
+  gap: 0;
+  min-width: 0;
+  padding: 0;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: #0f1218;
+  position: relative;
+}
+
+.addon-policy-select {
+  position: relative;
+  display: flex;
+  align-items: center;
+  min-width: 0;
+  width: 100%;
+  height: 38px;
+  padding: 0 30px 0 12px;
+  border-right: 1px solid var(--line);
+  border-radius: 6px 0 0 0;
+  color: var(--text);
+  cursor: pointer;
+  user-select: none;
+}
+
+.addon-policy-select span {
+  display: block;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.addon-policy-select::after {
+  content: "";
+  position: absolute;
+  right: 10px;
+  top: 50%;
+  width: 7px;
+  height: 7px;
+  border-right: 2px solid var(--soft);
+  border-bottom: 2px solid var(--soft);
+  transform: translateY(-70%) rotate(45deg);
+  transition: transform 0.12s ease;
+}
+
+.addon-policy-select.open::after {
+  transform: translateY(-20%) rotate(225deg);
+}
+
+.addon-policy-select:focus-visible {
+  outline: 2px solid rgba(47, 211, 184, 0.55);
+  outline-offset: -2px;
+}
+
+.addon-policy-menu {
+  position: absolute;
+  z-index: 80;
+  top: 38px;
+  left: -1px;
+  width: calc(100% + 1px);
+  overflow: hidden;
+  border: 1px solid #2e3849;
+  border-radius: 0 0 7px 7px;
+  background: #10151f;
+  box-shadow: 0 16px 28px rgba(0, 0, 0, 0.38);
+}
+
+.addon-policy-option {
+  display: block;
+  width: 100%;
+  min-height: 34px;
+  padding: 8px 12px;
+  border: 0;
+  border-bottom: 1px solid rgba(53, 64, 84, 0.55);
+  background: transparent;
+  color: var(--soft);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.addon-policy-option:last-child {
+  border-bottom: 0;
+}
+
+.addon-policy-option:hover,
+.addon-policy-option:focus-visible {
+  background: #1a2434;
+  color: #fff;
+  outline: none;
+}
+
+.addon-policy-option.active {
+  background: #1d4ed8;
+  color: #fff;
+  font-weight: 700;
+}
+
+.addon-policy-button {
+  min-height: 38px;
+  padding: 0 10px;
+  border: 0;
+  border-radius: 0 6px 0 0;
+  background: #1d4ed8;
+  color: #f8fbff;
+  font-size: 14px;
+  font-weight: 600;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.addon-policy-button:hover:not(:disabled) {
+  background: #2563eb;
+}
+
+.addon-policy-button:disabled {
+  cursor: wait;
+  opacity: 0.6;
+}
+
+.addon-policy-status {
+  grid-column: 1 / -1;
+  min-height: 16px;
+  padding: 1px 10px 4px;
+  color: var(--muted);
+  font-size: 11.5px;
+  line-height: 1.2;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.addon-policy-status.ok {
+  color: var(--accent);
+}
+
+.addon-policy-status.warn {
+  color: var(--warn);
+}
+
+.addon-policy-status.error {
+  color: #ff8995;
 }
 
 .summary-grid {
   display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
+  grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: 10px;
   margin: 16px 0;
 }

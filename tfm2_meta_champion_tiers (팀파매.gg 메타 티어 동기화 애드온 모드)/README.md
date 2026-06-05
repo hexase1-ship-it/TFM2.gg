@@ -100,3 +100,13 @@ Teamfight Manager2\mods\tfm2_meta_champion_tiers\debug.log
 When installed through `TFM2GGInstaller.exe`, this addon is copied to `Teamfight Manager2\mods\tfm2_meta_champion_tiers`.
 The installer rewrites `config.ini` so the addon reads `champion_tier_policy.tsv` from the dashboard's generated `data\policy_exports` folder.
 Refresh the dashboard after changing saves or patch filters, then restart the game so the addon reloads the latest policy file.
+
+## Dashboard Rule Preset Sync
+
+TFM2.gg dashboard can regenerate `champion_tier_policy.tsv` for the same rule preset used by the dashboard tier view.
+
+- `classic`: default balanced policy.
+- `fearless`: raises draft-pressure weight for fearless play.
+- `hardFearless`: raises draft-pressure weight further for hard fearless play.
+
+Use the dashboard toolbar's in-game addon policy selector, then click the apply button. The addon will reload the TSV when the file modification time changes; if the in-game champion info screen is already open, reload the save or restart the game once.

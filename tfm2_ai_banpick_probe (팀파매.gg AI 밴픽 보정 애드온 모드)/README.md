@@ -103,6 +103,10 @@ policy_dir=C:\Path\To\MetadataExport
 policy_file=ai_champion_policy.tsv
 ```
 
+## Dashboard Rule Preset Sync
+
+The dashboard's in-game addon policy apply button also regenerates `ai_champion_policy.tsv` with the selected policy preset. Use this when you want AI draft bias to follow `classic`, `fearless`, or `hardFearless` scoring rather than the default classic policy.
+
 - `overall_divisor`: 낮을수록 메타 점수 영향이 강해집니다.
 - `min_bias`, `max_bias`: 메타 보정의 최소/최대 한계입니다.
 - 파일을 바꾼 뒤에는 게임을 완전히 껐다가 다시 켭니다.

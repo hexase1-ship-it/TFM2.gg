@@ -1,4 +1,4 @@
-const { app, BrowserWindow, Menu, dialog, shell } = require("electron");
+const { app, BrowserWindow, Menu, dialog, shell, ipcMain } = require("electron");
 const { spawn } = require("node:child_process");
 const fs = require("node:fs");
 const http = require("node:http");
@@ -27,6 +27,10 @@ let lastRefreshAt = null;
 let refreshing = false;
 let watcherStarted = false;
 let updatePromptShown = false;
+let policyIpcRegistered = false;
+
+const POLICY_PRESET_IDS = new Set(["classic", "fearless", "hardFearless"]);
+const FOLLOW_DASHBOARD_POLICY = "followDashboard";
 
 function nowEpoch() {
   return Math.floor(Date.now() / 1000);
@@ -167,9 +171,16 @@ function downloadFile(url, destination) {
   });
 }
 
-function runPowershell(args, cwd) {
+function runPowershell(args, cwd, extraEnv = {}) {
   return new Promise((resolve, reject) => {
-    const child = spawn("powershell.exe", args, { cwd, windowsHide: true });
+    const child = spawn("powershell.exe", args, {
+      cwd,
+      windowsHide: true,
+      env: {
+        ...process.env,
+        ...extraEnv
+      }
+    });
     let output = "";
     child.stdout.on("data", (data) => {
       output += data.toString();
@@ -198,6 +209,70 @@ function readJsonFile(file) {
   } catch {
     return null;
   }
+}
+
+function policySettingsFile() {
+  return path.join(dashboardDir, "data", "policy-settings.json");
+}
+
+function normalizePolicySettings(input = {}) {
+  const existing = typeof input === "object" && input ? input : {};
+  const mode = String(existing.addonPolicyPreset || FOLLOW_DASHBOARD_POLICY);
+  const dashboardPreset = POLICY_PRESET_IDS.has(String(existing.dashboardPreset))
+    ? String(existing.dashboardPreset)
+    : "classic";
+  const addonPolicyPreset = mode === FOLLOW_DASHBOARD_POLICY || POLICY_PRESET_IDS.has(mode)
+    ? mode
+    : FOLLOW_DASHBOARD_POLICY;
+  const effectivePreset = addonPolicyPreset === FOLLOW_DASHBOARD_POLICY
+    ? dashboardPreset
+    : addonPolicyPreset;
+  return {
+    addonPolicyPreset,
+    dashboardPreset,
+    effectivePreset,
+    lastAppliedPreset: POLICY_PRESET_IDS.has(String(existing.lastAppliedPreset))
+      ? String(existing.lastAppliedPreset)
+      : null,
+    lastPolicyGeneratedAt: existing.lastPolicyGeneratedAt || null,
+    lastPolicyOutput: existing.lastPolicyOutput || ""
+  };
+}
+
+function readPolicySettings() {
+  const data = readJsonFile(policySettingsFile()) || {};
+  return normalizePolicySettings(data);
+}
+
+function writePolicySettings(settings) {
+  const normalized = normalizePolicySettings(settings);
+  fs.mkdirSync(path.dirname(policySettingsFile()), { recursive: true });
+  fs.writeFileSync(policySettingsFile(), `${JSON.stringify(normalized, null, 2)}\n`, "utf8");
+  return normalized;
+}
+
+async function regenerateAddonPolicies(settings) {
+  const normalized = writePolicySettings(settings);
+  const refreshScript = path.join(dashboardDir, "refresh_meta_dashboard.ps1");
+  const output = await runPowershell([
+    "-NoProfile",
+    "-ExecutionPolicy",
+    "Bypass",
+    "-File",
+    refreshScript,
+    "-PolicyOnly",
+    "-NoPrompt"
+  ], dashboardDir, {
+    TFM2_GAME_ROOT: gameRoot,
+    TFM2_POLICY_PRESET: normalized.effectivePreset,
+    PYTHONDONTWRITEBYTECODE: "1"
+  });
+  return writePolicySettings({
+    ...normalized,
+    lastAppliedPreset: normalized.effectivePreset,
+    lastPolicyGeneratedAt: new Date().toISOString(),
+    lastPolicyOutput: output.slice(-2000)
+  });
 }
 
 function resolvePackageManifest() {
@@ -487,6 +562,7 @@ function createWindow() {
     title: "TFM2 Meta Dashboard",
     show: false,
     webPreferences: {
+      preload: path.join(__dirname, "preload.cjs"),
       contextIsolation: true,
       nodeIntegration: false,
       sandbox: true
@@ -497,6 +573,16 @@ function createWindow() {
   mainWindow.on("closed", () => {
     mainWindow = null;
   });
+}
+
+function registerPolicyIpc() {
+  if (policyIpcRegistered) {
+    return;
+  }
+  policyIpcRegistered = true;
+  ipcMain.handle("tfm2gg-policy:get-settings", () => readPolicySettings());
+  ipcMain.handle("tfm2gg-policy:save-settings", (_event, settings) => writePolicySettings(settings));
+  ipcMain.handle("tfm2gg-policy:regenerate", async (_event, settings) => regenerateAddonPolicies(settings));
 }
 
 function createAppMenu() {
@@ -824,6 +910,7 @@ async function chooseSaveAndRefresh() {
 async function main() {
   dashboardDir = resolveDashboardDir();
   gameRoot = resolveGameRoot();
+  registerPolicyIpc();
   createWindow();
   createAppMenu();
   console.log(`Game root: ${gameRoot}`);
