@@ -5010,7 +5010,7 @@ def main():
             "metaExportMismatched": export_save_mismatched,
             "teamLookupSource": team_lookup_source,
             "athleteLookupSource": athlete_lookup_source,
-            "exactReplayAthleteNames": athlete_lookup_source == "meta_exporter",
+            "exactReplayAthleteNames": athlete_lookup_source in {"meta_exporter", "save_probe"},
             "matchAnalysisSource": "match_replays.debug.txt raw MatchReplayData; team/player names prefer teams.debug.txt and athletes.debug.txt from the same Meta Exporter snapshot" if meta_export_status["usable"] else "disabled: current Meta Exporter snapshot is incompatible, so stale replay debug files were ignored",
             "matchAnalysisDateSource": replay_date_status.get("source"),
             "itemCatalogSource": item_catalog.get("source"),
