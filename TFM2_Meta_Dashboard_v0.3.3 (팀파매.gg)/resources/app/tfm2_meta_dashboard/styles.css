@@ -1122,6 +1122,8 @@ tbody tr.active {
   height: 36px;
   border-radius: 5px;
   background-color: #1c2230;
+  object-fit: contain;
+  display: block;
 }
 
 .match-view {

@@ -1231,7 +1231,22 @@ function championIcon(champ, size = 42) {
   return `<div class="sprite-frame">${spriteHtml(champ?.asset, "champion-sprite", size)}</div>`;
 }
 
-function skillIcon(iconKey) {
+function escapeHtml(value) {
+  return String(value ?? "").replace(/[&<>"']/g, (char) => ({
+    "&": "&amp;",
+    "<": "&lt;",
+    ">": "&gt;",
+    '"': "&quot;",
+    "'": "&#39;",
+  }[char]));
+}
+
+function skillIcon(skillOrKey) {
+  const iconImage = typeof skillOrKey === "object" ? skillOrKey?.iconImage : "";
+  if (iconImage) {
+    return `<img class="skill-icon" src="${iconImage}" alt="" />`;
+  }
+  const iconKey = typeof skillOrKey === "object" ? skillOrKey?.iconKey : skillOrKey;
   const atlas = DATA.skillIconAtlas;
   const rect = atlas?.rects?.[iconKey];
   if (!atlas || !rect) return `<div class="skill-icon"></div>`;
@@ -2444,8 +2459,8 @@ function renderSkillList(champ) {
       .map(
         (skill) => `
           <div class="skill ${skill.changed ? "changed" : ""}">
-            ${skillIcon(skill.iconKey)}
-            <div><strong>Lv.${skill.level}</strong><p>${skill.description}</p></div>
+            ${skillIcon(skill)}
+            <div><strong>Lv.${skill.level}</strong><p>${escapeHtml(skill.description)}</p></div>
             <span>${skill.cooltime ? `${skill.cooltime}s` : "-"}</span>
           </div>`
       )

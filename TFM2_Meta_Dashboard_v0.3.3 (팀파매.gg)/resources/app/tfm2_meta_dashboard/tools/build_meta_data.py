@@ -6,6 +6,7 @@ import math
 import os
 import re
 import struct
+import zlib
 from collections import Counter, defaultdict
 from datetime import datetime
 from pathlib import Path
@@ -338,6 +339,215 @@ def png_dimensions(path):
     return struct.unpack(">II", header[16:24])
 
 
+def png_data_uri(width, height, rgba):
+    if width <= 0 or height <= 0 or len(rgba) != width * height * 4:
+        return None
+    scanlines = bytearray()
+    stride = width * 4
+    for y in range(height):
+        scanlines.append(0)
+        start = y * stride
+        scanlines.extend(rgba[start : start + stride])
+
+    def chunk(kind, payload):
+        return (
+            struct.pack(">I", len(payload))
+            + kind
+            + payload
+            + struct.pack(">I", zlib.crc32(kind + payload) & 0xFFFFFFFF)
+        )
+
+    png = (
+        b"\x89PNG\r\n\x1a\n"
+        + chunk(b"IHDR", struct.pack(">IIBBBBB", width, height, 8, 6, 0, 0, 0))
+        + chunk(b"IDAT", zlib.compress(bytes(scanlines), 9))
+        + chunk(b"IEND", b"")
+    )
+    return "data:image/png;base64," + base64.b64encode(png).decode("ascii")
+
+
+def alpha_blend_pixel(canvas, index, red, green, blue, alpha):
+    if alpha <= 0:
+        return
+    if alpha >= 255 and canvas[index + 3] == 0:
+        canvas[index : index + 4] = bytes((red, green, blue, alpha))
+        return
+    dst_alpha = canvas[index + 3]
+    out_alpha = alpha + (dst_alpha * (255 - alpha) + 127) // 255
+    if out_alpha <= 0:
+        return
+    for channel, src in enumerate((red, green, blue)):
+        dst = canvas[index + channel]
+        src_part = src * alpha
+        dst_part = dst * dst_alpha * (255 - alpha) // 255
+        canvas[index + channel] = min(255, (src_part + dst_part + out_alpha // 2) // out_alpha)
+    canvas[index + 3] = min(255, out_alpha)
+
+
+def crop_alpha_bbox(width, height, rgba):
+    min_x, min_y = width, height
+    max_x, max_y = -1, -1
+    for y in range(height):
+        for x in range(width):
+            if rgba[(y * width + x) * 4 + 3]:
+                min_x = min(min_x, x)
+                min_y = min(min_y, y)
+                max_x = max(max_x, x)
+                max_y = max(max_y, y)
+    if max_x < min_x or max_y < min_y:
+        return 0, 0, width, height, bytes(rgba)
+    crop_w = max_x - min_x + 1
+    crop_h = max_y - min_y + 1
+    cropped = bytearray(crop_w * crop_h * 4)
+    for y in range(crop_h):
+        src = ((min_y + y) * width + min_x) * 4
+        dst = y * crop_w * 4
+        cropped[dst : dst + crop_w * 4] = rgba[src : src + crop_w * 4]
+    return min_x, min_y, crop_w, crop_h, bytes(cropped)
+
+
+def aseprite_first_frame_png(path):
+    try:
+        data = Path(path).read_bytes()
+    except OSError:
+        return None
+    if len(data) < 144:
+        return None
+    try:
+        if struct.unpack_from("<H", data, 4)[0] != 0xA5E0:
+            return None
+        frame_count = struct.unpack_from("<H", data, 6)[0]
+        canvas_width, canvas_height = struct.unpack_from("<HH", data, 8)
+        color_depth = struct.unpack_from("<H", data, 12)[0]
+    except struct.error:
+        return None
+    if frame_count <= 0 or canvas_width <= 0 or canvas_height <= 0 or color_depth != 32:
+        return None
+
+    frame_offset = 128
+    try:
+        frame_size = struct.unpack_from("<I", data, frame_offset)[0]
+        if struct.unpack_from("<H", data, frame_offset + 4)[0] != 0xF1FA:
+            return None
+        chunk_count = struct.unpack_from("<I", data, frame_offset + 12)[0] or struct.unpack_from("<H", data, frame_offset + 6)[0]
+    except struct.error:
+        return None
+
+    frame_end = min(len(data), frame_offset + frame_size)
+    chunk_offset = frame_offset + 16
+    canvas = bytearray(canvas_width * canvas_height * 4)
+    for _ in range(chunk_count):
+        if chunk_offset + 6 > frame_end:
+            break
+        try:
+            chunk_size = struct.unpack_from("<I", data, chunk_offset)[0]
+            chunk_type = struct.unpack_from("<H", data, chunk_offset + 4)[0]
+        except struct.error:
+            break
+        if chunk_size <= 0:
+            break
+        chunk_end = min(frame_end, chunk_offset + chunk_size)
+        if chunk_type == 0x2005 and chunk_offset + 22 <= chunk_end:
+            try:
+                cel_x, cel_y = struct.unpack_from("<hh", data, chunk_offset + 8)
+                opacity = data[chunk_offset + 12]
+                cel_type = struct.unpack_from("<H", data, chunk_offset + 13)[0]
+                payload_offset = chunk_offset + 22
+                cel_width, cel_height = struct.unpack_from("<HH", data, payload_offset)
+                pixel_offset = payload_offset + 4
+                if cel_type == 0:
+                    pixels = data[pixel_offset:chunk_end]
+                elif cel_type == 2:
+                    pixels = zlib.decompress(data[pixel_offset:chunk_end])
+                else:
+                    pixels = b""
+            except (struct.error, zlib.error):
+                pixels = b""
+            expected = cel_width * cel_height * 4
+            if len(pixels) >= expected:
+                for y in range(cel_height):
+                    dst_y = cel_y + y
+                    if dst_y < 0 or dst_y >= canvas_height:
+                        continue
+                    for x in range(cel_width):
+                        dst_x = cel_x + x
+                        if dst_x < 0 or dst_x >= canvas_width:
+                            continue
+                        src_index = (y * cel_width + x) * 4
+                        red, green, blue, alpha = pixels[src_index : src_index + 4]
+                        alpha = (alpha * opacity + 127) // 255
+                        dst_index = (dst_y * canvas_width + dst_x) * 4
+                        alpha_blend_pixel(canvas, dst_index, red, green, blue, alpha)
+        chunk_offset += chunk_size
+
+    _crop_x, _crop_y, crop_width, crop_height, cropped = crop_alpha_bbox(canvas_width, canvas_height, canvas)
+    uri = png_data_uri(crop_width, crop_height, cropped)
+    if not uri:
+        return None
+    return {
+        "sheet": uri,
+        "sheetWidth": crop_width,
+        "sheetHeight": crop_height,
+        "frame": {"x": 0, "y": 0, "w": crop_width, "h": crop_height},
+        "renderScale": 1.45 if crop_height >= 72 else 1.2,
+    }
+
+
+def external_asset_candidates(mod_root, source):
+    if not source:
+        return []
+    source_text = str(source).replace("\\", "/").strip().rstrip("/")
+    if not source_text:
+        return []
+    parts = [part for part in source_text.split("/") if part]
+    candidates = []
+    if len(parts) > 2 and parts[0] == "asset":
+        candidates.append(Path(mod_root).joinpath(*parts[2:]))
+    if len(parts) > 1:
+        candidates.append(Path(mod_root).joinpath(*parts[1:]))
+    candidates.append(Path(mod_root).joinpath(*parts))
+
+    out = []
+    seen = set()
+    for candidate in candidates:
+        key = str(candidate)
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(candidate)
+    return out
+
+
+def resolve_external_png(mod_root, source):
+    for candidate in external_asset_candidates(mod_root, source):
+        if candidate.suffix.lower() == ".png" and candidate.exists():
+            return candidate
+        png_path = Path(f"{candidate}.png")
+        if png_path.exists():
+            return png_path
+    return None
+
+
+def external_png_data_uri(mod_root, source, max_bytes=512 * 1024):
+    path = resolve_external_png(mod_root, source)
+    if not path:
+        return None
+    dimensions = png_dimensions(path)
+    if not dimensions:
+        return None
+    try:
+        data = path.read_bytes()
+    except OSError:
+        return None
+    if len(data) > max_bytes:
+        return None
+    return {
+        "src": "data:image/png;base64," + base64.b64encode(data).decode("ascii"),
+        "width": dimensions[0],
+        "height": dimensions[1],
+    }
+
+
 def resolve_external_sprite_base(mod_root, mod_id, source):
     if not source:
         return None
@@ -347,20 +557,7 @@ def resolve_external_sprite_base(mod_root, mod_id, source):
     if not source_text:
         return None
 
-    parts = [part for part in source_text.split("/") if part]
-    candidates = []
-    if len(parts) > 2 and parts[0] == "asset":
-        candidates.append(Path(mod_root).joinpath(*parts[2:]))
-    if len(parts) > 1:
-        candidates.append(Path(mod_root).joinpath(*parts[1:]))
-    candidates.append(Path(mod_root).joinpath(*parts))
-
-    seen = set()
-    for candidate in candidates:
-        key = str(candidate)
-        if key in seen:
-            continue
-        seen.add(key)
+    for candidate in external_asset_candidates(mod_root, source_text):
         if Path(f"{candidate}#sheet.png").exists():
             return candidate
     return None
@@ -407,6 +604,14 @@ def external_champion_asset(data, mod_meta):
     mod_root = Path(mod_meta.get("path") or "")
     base_path = resolve_external_sprite_base(mod_root, mod_meta.get("modId"), source)
     if not base_path:
+        for candidate in external_asset_candidates(mod_root, source):
+            aseprite_path = candidate if candidate.suffix.lower() == ".aseprite" else Path(f"{candidate}.aseprite")
+            if not aseprite_path.exists():
+                continue
+            aseprite_asset = aseprite_first_frame_png(aseprite_path)
+            if aseprite_asset:
+                asset.update(aseprite_asset)
+            return asset
         return asset
 
     sheet_path = Path(f"{base_path}#sheet.png")
@@ -470,16 +675,35 @@ def best_role_from_fit(role_fit):
     return max(role_fit.items(), key=lambda item: item[1])[0] if role_fit else "mid"
 
 
-def external_skill_payload(champion_id, key, action, translations):
+def clean_game_rich_text(text):
+    text = str(text or "")
+    if text.startswith("#asset/"):
+        return ""
+    text = re.sub(r"<i#[^>]*>", "", text)
+    text = re.sub(r"<#[0-9a-fA-F]{6,8}>", "", text)
+    text = text.replace("<>", "")
+    text = re.sub(r"<[^>]*>", "", text)
+    text = re.sub(r"\s+", " ", text)
+    return text.strip()
+
+
+def external_skill_payload(champion_id, key, action, translations, icon_source=None, mod_meta=None):
     action = action or {}
-    description = translations.get(key) or action.get("description") or ""
-    return {
+    description = clean_game_rich_text(translations.get(key) or action.get("description") or "")
+    payload = {
         "id": key,
         "level": {"skill": 1, "skill2": 3, "ult": 5}.get(key, 1),
         "iconKey": f"{champion_id}_{key}",
         "cooltime": format_cooltime_ticks(action.get("cooltime")) or "-",
         "description": description,
     }
+    if icon_source and mod_meta:
+        icon = external_png_data_uri(Path(mod_meta.get("path") or ""), icon_source)
+        if icon:
+            payload["iconImage"] = icon["src"]
+            payload["iconWidth"] = icon["width"]
+            payload["iconHeight"] = icon["height"]
+    return payload
 
 
 def external_champion_payload(file_path, mod_meta, translations):
@@ -492,6 +716,7 @@ def external_champion_payload(file_path, mod_meta, translations):
     raw_tags = [str(tag) for tag in (data.get("tags") or [])]
     tags = sorted({*raw_tags, str(category)})
     role_fit = infer_role_fit(category, tags)
+    skill_icons = data.get("skill_icons") if isinstance(data.get("skill_icons"), list) else []
     return {
         "id": champion_id,
         "name": text.get("name") or champion_id,
@@ -499,14 +724,21 @@ def external_champion_payload(file_path, mod_meta, translations):
         "tags": tags,
         "rawTags": raw_tags,
         "description": {
-            key: text.get(key) or (data.get(key) or {}).get("description") or ""
+            key: clean_game_rich_text(text.get(key) or (data.get(key) or {}).get("description") or "")
             for key in ["attack", "skill", "skill2", "ult"]
         },
         "stats": map_entity_stats(data.get("stat")),
         "growth": map_entity_stats(data.get("growth")),
         "skills": [
-            external_skill_payload(champion_id, key, data.get(key), text)
-            for key in ["skill", "skill2", "ult"]
+            external_skill_payload(
+                champion_id,
+                key,
+                data.get(key),
+                text,
+                skill_icons[index] if index < len(skill_icons) else None,
+                mod_meta,
+            )
+            for index, key in enumerate(["skill", "skill2", "ult"])
         ],
         "metrics": {},
         "roleFit": role_fit,

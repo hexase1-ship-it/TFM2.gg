@@ -24,17 +24,19 @@ The mod does not change item stats, champion stats, prices, match rules, or bala
 
 ## Selection Logic
 
-For each champion in `builds.tournament`, the mod picks one build with this priority:
+For each champion, the mod picks one build with this priority:
 
 1. `latestPatch` from the dashboard file.
-2. Patch key `all`.
-3. Other patch keys.
-4. Position key `all` before role-specific keys, because this mod applies one default build per champion.
-5. `core3` before `core2`.
-6. Builds with at least `rules.recommendedMinGames`.
-7. Higher dashboard `score`.
-8. Higher `winRate`.
-9. Higher `games`.
+2. Tournament data first.
+3. Solo-rank data only fills champions missing from tournament data.
+4. Patch key `all`.
+5. Other patch keys.
+6. Position key `all` before role-specific keys, because this mod applies one default build per champion.
+7. `core3` before `core2`.
+8. Builds with at least `rules.recommendedMinGames`.
+9. Higher dashboard `score`.
+10. Higher `winRate`.
+11. Higher `games`.
 
 The selected dashboard `directions` are mapped directly to the game strategy directions:
 

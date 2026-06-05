@@ -54,6 +54,18 @@ fn apply_meta_items(scene: &mut Scene) {
         return;
     };
 
+    let team_id = {
+        let Ok(db) = data.db.try_borrow() else {
+            return;
+        };
+
+        let team_id = db.player_team_id();
+        if !db.teams.contains_key(&team_id) {
+            return;
+        }
+        team_id
+    };
+
     let Some(builds) = load_builds() else {
         return;
     };
@@ -62,9 +74,7 @@ fn apply_meta_items(scene: &mut Scene) {
         return;
     };
 
-    let team_id = db.player_team_id();
     let Some(team) = db.teams.get_mut(&team_id) else {
-        log_error_once(format!("apply: player team {team_id} not found"));
         return;
     };
 
@@ -173,20 +183,35 @@ fn parse_builds(
         .and_then(|rules| rules.get("recommendedMinGames"))
         .and_then(Value::as_u64)
         .unwrap_or(0);
-    let tournament = root
+    let builds = root
         .get("builds")
-        .and_then(|value| value.get("tournament"))
         .and_then(Value::as_object)
-        .ok_or_else(|| "missing builds.tournament object".to_string())?;
+        .ok_or_else(|| "missing builds object".to_string())?;
 
     let mut rows = HashMap::new();
-    if let Some(patch) = latest_patch.and_then(|patch| tournament.get(patch)) {
-        collect_patch_rows(patch, &mut rows, min_games);
+
+    for scope in ["tournament", "solo"] {
+        if let Some(patch) = latest_patch
+            .and_then(|patch| builds.get(scope).and_then(|scope_value| scope_value.get(patch)))
+        {
+            collect_patch_rows(patch, &mut rows, min_games);
+        }
     }
 
-    if rows.is_empty() {
-        for patch in tournament.values() {
+    for scope in ["tournament", "solo"] {
+        if let Some(patch) = builds.get(scope).and_then(|scope_value| scope_value.get("all")) {
             collect_patch_rows(patch, &mut rows, min_games);
+        }
+    }
+
+    for scope in ["tournament", "solo"] {
+        if let Some(scope_object) = builds.get(scope).and_then(Value::as_object) {
+            for (patch_key, patch) in scope_object {
+                if Some(patch_key.as_str()) == latest_patch || patch_key == "all" {
+                    continue;
+                }
+                collect_patch_rows(patch, &mut rows, min_games);
+            }
         }
     }
 

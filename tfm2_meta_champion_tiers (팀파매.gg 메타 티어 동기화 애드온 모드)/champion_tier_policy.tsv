@@ -1,18 +1,18 @@
 # AUTO_GENERATED_BY_TFM2_META_DASHBOARD
 # Do not hand-edit unless you intentionally want to override dashboard meta scoring.
-# Generated: 2026-06-06T00:04:09
-# Save: C:\Users\hexas\AppData\Roaming\TeamSamoyed\TeamfightManager2\data\save_20260605_013909.data
-# Source: tournament patch 2026.1.0
-# Patch: 2026.1.0
+# Generated: 2026-06-06T01:20:25
+# Save: C:\Users\hexas\AppData\Roaming\TeamSamoyed\TeamfightManager2\data\save_20260606_010734.data
+# Source: tournament patch 2026.0.0
+# Patch: 2026.0.0
 # Scope: tournament
 # Region: all
 # Role: all
 # Model: tfm2gg-meta-v1
 # Preset: classic weights={"draftPressure": 0.16, "lowerPressure": 0.12, "lowerStrength": 0.88, "strength": 0.84}
 # PolicyPresetSource: dashboard setting
-# Sample: normal min=10 reason=21 days since patch
-# WinPrior: mean=50.0 kappa=32.2
-# BaselinePresence: 27.1
+# Sample: early min=5 reason=22 matches
+# WinPrior: mean=50.0 kappa=29.6
+# BaselinePresence: 38.0
 # PolicyKind: championTier
 # OverallSemantic: dashboard_meta_tier_for_in_game_sabcd_no
 # OverallNote: overall is an S/A/B/C/D anchor for the native tier addon; No leaves overall blank so the native addon uses the tier column.
@@ -22,65 +22,73 @@
 # For No tier, overall is omitted so the native addon falls back to the tier column.
 # Non-eligible or low-sample champions are emitted as No with blank overall.
 # champion_id	tier	overall
-hunter	S	90.0
-barrier_magician	S	90.0
-ghost	A	75.0
-android	A	75.0
-circus_blade	A	75.0
-fighter	A	75.0
-swordman	A	75.0
-lancer	A	75.0
-ninja	A	75.0
-illusionist	B	62.0
-demon	B	62.0
-monk	B	62.0
-bomber	B	62.0
-dual_blader	B	62.0
+shield_bearer	B	62.0
 gambler	B	62.0
-poison_dart_hunter	B	62.0
-guardian_spirit	B	62.0
-shield_bearer	C	50.0
-hitman	C	50.0
+archer	B	62.0
+swordman	C	50.0
+gunner	C	50.0
+pythoness	C	50.0
+fighter	C	50.0
+beast_valtan	C	50.0
+white_mage	C	50.0
 soldier	C	50.0
-dancer	C	50.0
-wind_mage	C	50.0
-lightning_mage	C	50.0
-werewolf	C	50.0
-vampire	C	50.0
-jiangshi	D	35.0
-pyromancer	D	35.0
-executioner	D	35.0
-ogre	D	35.0
-archer	D	35.0
-clown	D	35.0
-pole_warrior	D	35.0
+test_mod_jhin	C	50.0
+guardian_spirit	C	50.0
+siege_breaker	D	35.0
+hunter	D	35.0
 cavalry_knight	D	35.0
-knight	D	35.0
-inquisitor	D	35.0
-magic_knight	D	35.0
-boomerang_hunter	D	35.0
-gunner	D	35.0
-bard	D	35.0
-druid	D	35.0
-dark_mage	D	35.0
-berserker	D	35.0
-exorcist	D	35.0
-priest	D	35.0
-whip_master	D	35.0
+test_mod_aatrox	D	35.0
+ghost	D	35.0
+ice_mage	D	35.0
+dancer	D	35.0
+executioner	D	35.0
+wind_mage	D	35.0
+hitman	No
+vampire	No
+dark_mage	No
+illusionist	No
+pyromancer	No
+test_mod_fiddlesticks	No
+bomber	No
+whip_master	No
+lancer	No
 hammerer	No
 prisoner	No
 spirit_caller	No
 enchanter	No
+inquisitor	No
+bard	No
 chef	No
+ogre	No
+oni	No
 plague_doctor	No
-ice_mage	No
+exorcist	No
+android	No
+demon	No
+priest	No
+test_mod_viktor	No
+boomerang_hunter	No
 voodoo_shaman	No
-white_mage	No
-beast_valtan	No
-pythoness	No
+pole_warrior	No
+test_mod_vayne	No
+test_mod_veigar	No
+lightning_mage	No
+monk	No
 malphite	No
+magic_knight	No
+druid	No
+dual_blader	No
+poison_dart_hunter	No
 taoist	No
 dokkaebi	No
+squirrel	No
+ninja	No
+werewolf	No
 necromancer	No
+knight	No
 shadowmancer	No
-siege_breaker	No
+berserker	No
+clown	No
+circus_blade	No
+barrier_magician	No
+jiangshi	No
