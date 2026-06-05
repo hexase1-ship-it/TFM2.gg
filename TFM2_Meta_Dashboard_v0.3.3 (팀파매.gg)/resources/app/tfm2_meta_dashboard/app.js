@@ -37,6 +37,13 @@ const tierPresets = [
   ["hardFearless", "하드 피어리스", { win: 1, pick: 0.15, ban: 0.85 }],
 ];
 
+const addonPolicyPresetModes = [
+  ["followDashboard", "인게임: 화면 룰"],
+  ["classic", "인게임: 클래식"],
+  ["fearless", "인게임: 피어리스"],
+  ["hardFearless", "인게임: 하드 피어리스"],
+];
+
 const sampleModes = [
   ["auto", "자동 표본"],
   ["early", "초반 5픽"],
@@ -115,6 +122,16 @@ const roleLabels = Object.fromEntries(roles);
 const scopeLabels = Object.fromEntries(scopes);
 const leagueMeta = DATA.leagueMeta || {};
 let metaTierCache = null;
+let addonPolicySettings = {
+  addonPolicyPreset: "followDashboard",
+  dashboardPreset: state.tierPreset,
+  effectivePreset: state.tierPreset,
+  lastAppliedPreset: null,
+  lastPolicyGeneratedAt: null,
+  lastPolicyOutput: "",
+};
+let addonPolicyBusy = false;
+let addonPolicyMenuOpen = false;
 
 function splitPayloadForScope(scope = state.scope) {
   if (scope === "overall") return DATA.combinedSplits || {};
@@ -435,6 +452,151 @@ function currentTierPreset() {
 
 function currentModelPreset() {
   return scoreModelSpec.presets?.[state.tierPreset] || scoreModelSpec.presets?.classic || DEFAULT_SCORE_MODEL_SPEC.presets.classic;
+}
+
+function tierPresetLabel(id) {
+  return tierPresets.find(([value]) => value === id)?.[1] || id || "classic";
+}
+
+function normalizeAddonPolicySettings(settings = addonPolicySettings) {
+  const modeValues = addonPolicyPresetModes.map(([value]) => value);
+  const presetValues = tierPresets.map(([value]) => value);
+  const addonPolicyPreset = modeValues.includes(settings.addonPolicyPreset)
+    ? settings.addonPolicyPreset
+    : "followDashboard";
+  const dashboardPreset = presetValues.includes(settings.dashboardPreset)
+    ? settings.dashboardPreset
+    : state.tierPreset;
+  const effectivePreset = addonPolicyPreset === "followDashboard" ? state.tierPreset : addonPolicyPreset;
+  return {
+    ...settings,
+    addonPolicyPreset,
+    dashboardPreset: state.tierPreset || dashboardPreset,
+    effectivePreset,
+  };
+}
+
+function addonPolicyStatusText(settings = addonPolicySettings) {
+  const normalized = normalizeAddonPolicySettings(settings);
+  const effectiveLabel = tierPresetLabel(normalized.effectivePreset);
+  if (!window.tfm2ggPolicy) {
+    return { text: "앱 실행본 전용", className: "warn", title: "패키지 실행본에서만 인게임 애드온 정책을 적용할 수 있습니다." };
+  }
+  if (addonPolicyBusy) {
+    return { text: "적용 중...", className: "warn", title: `${effectiveLabel} 기준으로 인게임 애드온 정책을 재생성 중입니다.` };
+  }
+  if (normalized.lastAppliedPreset !== normalized.effectivePreset) {
+    return { text: "적용 필요", className: "warn", title: `${effectiveLabel} 기준으로 다시 적용해야 합니다.` };
+  }
+  const appliedAt = normalized.lastPolicyGeneratedAt ? new Date(normalized.lastPolicyGeneratedAt) : null;
+  const time = appliedAt && Number.isFinite(appliedAt.getTime())
+    ? appliedAt.toLocaleTimeString("ko-KR", { hour: "2-digit", minute: "2-digit" })
+    : "";
+  return {
+    text: `적용됨${time ? ` ${time}` : ""}`,
+    className: "ok",
+    title: `${effectiveLabel} 기준 적용됨${time ? ` ${time}` : ""}`,
+  };
+}
+
+function setAddonPolicyMenuOpen(open) {
+  addonPolicyMenuOpen = Boolean(open);
+  const select = document.getElementById("addonPolicyPresetSelect");
+  const menu = document.getElementById("addonPolicyPresetMenu");
+  if (!select || !menu) return;
+  select.classList.toggle("open", addonPolicyMenuOpen);
+  select.setAttribute("aria-expanded", addonPolicyMenuOpen ? "true" : "false");
+  menu.hidden = !addonPolicyMenuOpen;
+}
+
+function renderAddonPolicyMenu() {
+  const select = document.getElementById("addonPolicyPresetSelect");
+  const label = document.getElementById("addonPolicyPresetLabel");
+  const menu = document.getElementById("addonPolicyPresetMenu");
+  if (!select || !label || !menu) return;
+  const activeLabel = addonPolicyPresetModes.find(([value]) => value === addonPolicySettings.addonPolicyPreset)?.[1]
+    || tierPresetLabel(addonPolicySettings.effectivePreset);
+  select.dataset.value = addonPolicySettings.addonPolicyPreset;
+  select.title = "인게임 애드온 티어 기준";
+  label.textContent = activeLabel;
+  menu.innerHTML = addonPolicyPresetModes
+    .map(([value, optionLabel]) => `
+      <button
+        type="button"
+        class="addon-policy-option ${addonPolicySettings.addonPolicyPreset === value ? "active" : ""}"
+        data-addon-policy-preset="${value}"
+        role="option"
+        aria-selected="${addonPolicySettings.addonPolicyPreset === value ? "true" : "false"}"
+      >${optionLabel}</button>`)
+    .join("");
+  setAddonPolicyMenuOpen(addonPolicyMenuOpen);
+}
+
+function renderAddonPolicyControls() {
+  const select = document.getElementById("addonPolicyPresetSelect");
+  const button = document.getElementById("addonPolicyApplyButton");
+  const status = document.getElementById("addonPolicyStatus");
+  if (!select || !button || !status) return;
+  addonPolicySettings = normalizeAddonPolicySettings(addonPolicySettings);
+  renderAddonPolicyMenu();
+  const statusInfo = addonPolicyStatusText(addonPolicySettings);
+  status.textContent = statusInfo.text;
+  status.title = statusInfo.title || statusInfo.text;
+  status.className = `addon-policy-status ${statusInfo.className}`;
+  button.title = `인게임 애드온 티어표 적용 (${tierPresetLabel(addonPolicySettings.effectivePreset)} 기준)`;
+  button.disabled = addonPolicyBusy || !window.tfm2ggPolicy;
+}
+
+async function saveAddonPolicySettings(partial = {}) {
+  addonPolicySettings = normalizeAddonPolicySettings({
+    ...addonPolicySettings,
+    ...partial,
+    dashboardPreset: state.tierPreset,
+  });
+  renderAddonPolicyControls();
+  if (!window.tfm2ggPolicy) return addonPolicySettings;
+  try {
+    addonPolicySettings = normalizeAddonPolicySettings(await window.tfm2ggPolicy.saveSettings(addonPolicySettings));
+  } catch (error) {
+    console.warn("Failed to save addon policy settings:", error);
+  }
+  renderAddonPolicyControls();
+  return addonPolicySettings;
+}
+
+async function loadAddonPolicySettings() {
+  if (!window.tfm2ggPolicy) {
+    renderAddonPolicyControls();
+    return;
+  }
+  try {
+    addonPolicySettings = normalizeAddonPolicySettings(await window.tfm2ggPolicy.getSettings());
+  } catch (error) {
+    console.warn("Failed to load addon policy settings:", error);
+  }
+  renderAddonPolicyControls();
+}
+
+async function applyAddonPolicyPreset() {
+  if (!window.tfm2ggPolicy || addonPolicyBusy) return;
+  addonPolicyBusy = true;
+  addonPolicySettings = normalizeAddonPolicySettings({
+    ...addonPolicySettings,
+    dashboardPreset: state.tierPreset,
+  });
+  renderAddonPolicyControls();
+  try {
+    addonPolicySettings = normalizeAddonPolicySettings(await window.tfm2ggPolicy.regenerate(addonPolicySettings));
+  } catch (error) {
+    const status = document.getElementById("addonPolicyStatus");
+    if (status) {
+      status.textContent = `적용 실패: ${error?.message || error}`;
+      status.className = "addon-policy-status error";
+    }
+  } finally {
+    addonPolicyBusy = false;
+    renderAddonPolicyControls();
+  }
 }
 
 function finiteNumber(value, fallback = NaN) {
@@ -1416,6 +1578,7 @@ function renderControls() {
       .map(([value, label]) => `<option value="${value}" ${state.tierPreset === value ? "selected" : ""}>${label}</option>`)
       .join("");
   }
+  renderAddonPolicyControls();
   const sampleModeSelect = document.getElementById("sampleModeSelect");
   if (sampleModeSelect) {
     sampleModeSelect.innerHTML = sampleModes
@@ -2864,7 +3027,87 @@ document.getElementById("patchSelect").addEventListener("change", (event) => {
 document.getElementById("tierPresetSelect")?.addEventListener("change", (event) => {
   state.tierPreset = event.target.value;
   writeStoredSetting("tfm2:tierPreset", state.tierPreset);
+  saveAddonPolicySettings({ dashboardPreset: state.tierPreset });
   render();
+});
+
+document.getElementById("addonPolicyPresetSelect")?.addEventListener("click", (event) => {
+  const option = event.target?.closest?.("[data-addon-policy-preset]");
+  if (option) {
+    setAddonPolicyMenuOpen(false);
+    saveAddonPolicySettings({ addonPolicyPreset: option.dataset.addonPolicyPreset });
+    return;
+  }
+  setAddonPolicyMenuOpen(!addonPolicyMenuOpen);
+});
+
+document.getElementById("addonPolicyPresetSelect")?.addEventListener("keydown", (event) => {
+  const option = event.target?.closest?.("[data-addon-policy-preset]");
+  if (option && event.key === "Escape") {
+    event.preventDefault();
+    setAddonPolicyMenuOpen(false);
+    document.getElementById("addonPolicyPresetSelect")?.focus();
+    return;
+  }
+  if (option && (event.key === "Enter" || event.key === " ")) {
+    event.preventDefault();
+    setAddonPolicyMenuOpen(false);
+    saveAddonPolicySettings({ addonPolicyPreset: option.dataset.addonPolicyPreset });
+    document.getElementById("addonPolicyPresetSelect")?.focus();
+    return;
+  }
+  if (option && (event.key === "ArrowDown" || event.key === "ArrowUp")) {
+    event.preventDefault();
+    const options = [...document.querySelectorAll("[data-addon-policy-preset]")];
+    const index = Math.max(0, options.indexOf(option));
+    const nextIndex = event.key === "ArrowDown"
+      ? Math.min(options.length - 1, index + 1)
+      : Math.max(0, index - 1);
+    options[nextIndex]?.focus();
+    return;
+  }
+  if (event.key === "Enter" || event.key === " ") {
+    event.preventDefault();
+    setAddonPolicyMenuOpen(!addonPolicyMenuOpen);
+    if (addonPolicyMenuOpen) {
+      requestAnimationFrame(() => {
+        document.querySelector(".addon-policy-option.active")?.focus()
+          || document.querySelector(".addon-policy-option")?.focus();
+      });
+    }
+    return;
+  }
+  if (event.key === "ArrowDown") {
+    event.preventDefault();
+    setAddonPolicyMenuOpen(true);
+    requestAnimationFrame(() => {
+      document.querySelector(".addon-policy-option.active")?.focus()
+        || document.querySelector(".addon-policy-option")?.focus();
+    });
+    return;
+  }
+  if (event.key === "Escape") {
+    setAddonPolicyMenuOpen(false);
+  }
+});
+
+document.addEventListener("click", (event) => {
+  if (!event.target?.closest?.("#addonPolicyPresetSelect")) {
+    setAddonPolicyMenuOpen(false);
+  }
+});
+
+document.getElementById("addonPolicyApplyButton")?.addEventListener("click", () => {
+  applyAddonPolicyPreset();
+});
+
+document.addEventListener("keydown", (event) => {
+  const tagName = event.target?.tagName?.toLowerCase();
+  if (["input", "select", "textarea", "button"].includes(tagName)) return;
+  if (event.ctrlKey && event.shiftKey && !event.altKey && event.key?.toLowerCase() === "p") {
+    event.preventDefault();
+    applyAddonPolicyPreset();
+  }
 });
 
 document.getElementById("sampleModeSelect")?.addEventListener("change", (event) => {
@@ -2885,6 +3128,7 @@ document.getElementById("sourceLine").textContent = DATA.save.path
   : "Save: not found";
 
 render();
+loadAddonPolicySettings();
 renderWatchStatus();
 loadWatchStatus();
 window.setInterval(loadWatchStatus, 5000);

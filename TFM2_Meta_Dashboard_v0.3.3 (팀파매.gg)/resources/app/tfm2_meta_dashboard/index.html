@@ -4,7 +4,7 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>TFM2 Meta Dashboard</title>
-    <link rel="stylesheet" href="styles.css?v=20260604-solo-honey" />
+    <link rel="stylesheet" href="styles.css?v=20260605-policy-ui" />
   </head>
   <body>
     <aside class="sidebar">
@@ -60,6 +60,29 @@
             <option value="name">이름순</option>
           </select>
           <select id="tierPresetSelect" class="select" title="티어 기준"></select>
+          <div class="addon-policy-control">
+            <div
+              id="addonPolicyPresetSelect"
+              class="addon-policy-select"
+              role="button"
+              tabindex="0"
+              aria-haspopup="listbox"
+              aria-expanded="false"
+              aria-label="인게임 애드온 티어 기준"
+              title="인게임 애드온 티어 기준"
+            >
+              <span id="addonPolicyPresetLabel"></span>
+              <div id="addonPolicyPresetMenu" class="addon-policy-menu" role="listbox" hidden></div>
+            </div>
+            <button
+              id="addonPolicyApplyButton"
+              class="addon-policy-button"
+              type="button"
+              title="인게임 애드온 티어표 적용"
+              aria-label="인게임 애드온 티어표 적용"
+            >적용</button>
+            <span id="addonPolicyStatus" class="addon-policy-status"></span>
+          </div>
           <select id="sampleModeSelect" class="select" title="표본 기준"></select>
           <select id="tournamentSplitSelect" class="select" title="지역/세부 범위"></select>
           <select id="patchSelect" class="select"></select>
@@ -96,6 +119,6 @@
     </main>
 
     <script src="data/meta-data.js?v=20260604-solo-honey"></script>
-    <script src="app.js?v=20260604-solo-honey"></script>
+    <script src="app.js?v=20260605-policy-ui"></script>
   </body>
 </html>

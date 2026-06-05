@@ -15,6 +15,7 @@ DASHBOARD = Path(__file__).resolve().parents[1]
 REPO_ROOT = DASHBOARD.parents[3] if len(DASHBOARD.parents) > 3 else ROOT
 OUT = DASHBOARD / "data" / "meta-data.js"
 SCORE_MODEL_SPEC = DASHBOARD / "data" / "score-model-spec.json"
+POLICY_SETTINGS = DASHBOARD / "data" / "policy-settings.json"
 CORE_ITEM_BUILDS_OUT = DASHBOARD / "data" / "core-item-builds.json"
 CORE_ITEM_BUILDS_MOD_OUT = ROOT / "mods" / "tfm2_meta_item_delegate" / "core-item-builds.json"
 CORE_ITEM_BUILDS_MOD_DATA_OUT = ROOT / "mods" / "tfm2_meta_item_delegate" / "data" / "core-item-builds.json"
@@ -56,6 +57,8 @@ POLICY_PRESETS = {
     "fearless": {"label": "fearless", "weights": {"win": 1.0, "pick": 0.18, "ban": 0.55}},
     "hardFearless": {"label": "hardFearless", "weights": {"win": 1.0, "pick": 0.15, "ban": 0.85}},
 }
+POLICY_PRESET_IDS = set(POLICY_PRESETS)
+FOLLOW_DASHBOARD_POLICY = "followDashboard"
 POLICY_TIER_MAP = {"OP": "S", "1": "A", "2": "B", "3": "C", "4": "D", "-": "No"}
 POLICY_TIER_SORT = {"S": 6, "A": 5, "B": 4, "C": 3, "D": 2, "No": 1}
 TIER_POLICY_OVERALL_ANCHORS = {"S": 90.0, "A": 75.0, "B": 62.0, "C": 50.0, "D": 35.0}
@@ -145,6 +148,32 @@ def load_score_model_spec():
         else:
             merged[key] = value
     return merged
+
+
+def load_policy_settings():
+    try:
+        data = json.loads(POLICY_SETTINGS.read_text(encoding="utf-8-sig"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def resolve_policy_preset():
+    env_preset = os.environ.get("TFM2_POLICY_PRESET")
+    if env_preset:
+        preset_id = env_preset.strip()
+        if preset_id in POLICY_PRESET_IDS:
+            return preset_id, "env"
+
+    settings = load_policy_settings()
+    mode = str(settings.get("addonPolicyPreset") or FOLLOW_DASHBOARD_POLICY).strip()
+    dashboard_preset = str(settings.get("dashboardPreset") or "classic").strip()
+    if mode == FOLLOW_DASHBOARD_POLICY:
+        preset_id = dashboard_preset if dashboard_preset in POLICY_PRESET_IDS else "classic"
+        return preset_id, "dashboard setting"
+    if mode in POLICY_PRESET_IDS:
+        return mode, "policy setting"
+    return "classic", "default"
 
 
 def first_existing(paths):
@@ -501,7 +530,7 @@ def round1(value):
 
 
 def policy_preset():
-    preset_id = os.environ.get("TFM2_POLICY_PRESET", "classic").strip() or "classic"
+    preset_id, _source = resolve_policy_preset()
     return POLICY_PRESETS.get(preset_id, POLICY_PRESETS["classic"])
 
 
@@ -827,6 +856,7 @@ def select_policy_stats(default_stats, stats_by_patch, patch_versions, scope="ov
 def build_policy_exports(champions, stats, generated_at, save_path, patch_key, source_label, replay_date_status, score_model_spec, scope="overall"):
     legacy_preset = policy_preset()
     preset_id = legacy_preset["label"]
+    _resolved_preset, preset_source = resolve_policy_preset()
     preset = model_preset(score_model_spec, preset_id)
     sample_info = effective_policy_sample_info(stats, replay_date_status)
     context = build_policy_score_context(stats, sample_info, score_model_spec)
@@ -909,6 +939,7 @@ def build_policy_exports(champions, stats, generated_at, save_path, patch_key, s
         "role": "all",
         "modelVersion": score_model_spec.get("modelVersion"),
         "preset": preset.get("label") or preset_id,
+        "presetSource": preset_source,
         "weights": {
             "strength": preset.get("metaStrengthWeight"),
             "draftPressure": preset.get("metaPressureWeight"),
@@ -967,6 +998,7 @@ def render_policy_tsv(policy, profile_key):
         f"# Role: {meta.get('role')}",
         f"# Model: {meta.get('modelVersion')}",
         f"# Preset: {meta.get('preset')} weights={json.dumps(meta.get('weights'), sort_keys=True)}",
+        f"# PolicyPresetSource: {meta.get('presetSource')}",
         f"# Sample: {meta.get('sample', {}).get('mode')} min={meta.get('sample', {}).get('minSample')} reason={meta.get('sample', {}).get('reason')}",
         f"# WinPrior: mean={meta.get('winPrior', {}).get('mean')} kappa={meta.get('winPrior', {}).get('kappa')}",
         f"# BaselinePresence: {meta.get('baselinePresence')}",
@@ -3979,11 +4011,87 @@ def parse_args():
         default=None,
         help="Optional TFM2 save file, data folder, or TeamfightManager2 appdata folder.",
     )
+    parser.add_argument(
+        "--policy-only",
+        action="store_true",
+        help="Regenerate addon policy TSV files from the current meta-data.js without rebuilding save statistics.",
+    )
     return parser.parse_args()
+
+
+def build_policy_exports_from_payload(payload, generated_at=None):
+    generated_at = generated_at or datetime.now().isoformat(timespec="seconds")
+    champions = payload.get("champions") or []
+    stats_by_scope = payload.get("statsByScope") or {}
+    stats_by_patch = payload.get("statsByPatch") or {}
+    patch_versions = list(payload.get("patches") or [])
+    if not patch_versions:
+        patch_versions = sorted(stats_by_patch, key=version_sort_key)
+    score_model_spec = payload.get("scoreModelSpec") or load_score_model_spec()
+    save_path = (payload.get("save") or {}).get("path")
+    replay_date_status = payload.get("replayDateStatus") or {}
+    tournament_stats = stats_by_scope.get("tournament") or {}
+    combined_stats = stats_by_scope.get("overall") or {}
+    tier_policy_stats, tier_policy_patch, tier_policy_source = select_policy_stats(
+        tournament_stats,
+        stats_by_patch,
+        patch_versions,
+        scope="tournament",
+    )
+    ai_policy_stats, ai_policy_patch, ai_policy_source = select_policy_stats(
+        combined_stats,
+        stats_by_patch,
+        patch_versions,
+        scope="overall",
+    )
+    champion_tier_policy_exports = build_policy_exports(
+        champions,
+        tier_policy_stats,
+        generated_at,
+        save_path,
+        tier_policy_patch,
+        tier_policy_source,
+        replay_date_status,
+        score_model_spec,
+        scope="tournament",
+    )
+    ai_champion_policy_exports = build_policy_exports(
+        champions,
+        ai_policy_stats,
+        generated_at,
+        save_path,
+        ai_policy_patch,
+        ai_policy_source,
+        replay_date_status,
+        score_model_spec,
+        scope="overall",
+    )
+    return champion_tier_policy_exports, ai_champion_policy_exports
+
+
+def run_policy_only():
+    if not OUT.exists():
+        raise SystemExit(f"Required file is missing: {OUT}")
+    payload = load_js_json(OUT)
+    champion_tier_policy_exports, ai_champion_policy_exports = build_policy_exports_from_payload(payload)
+    status = write_policy_exports(champion_tier_policy_exports, ai_champion_policy_exports)
+    for group in status.values():
+        for path in group.get("written", []):
+            print(f"Wrote {path}")
+        for skipped in group.get("skipped", []):
+            print(f"Skipped policy mirror {skipped.get('path')}: {skipped.get('reason')}")
+    print(
+        "policy_only=true "
+        f"championPreset={champion_tier_policy_exports['metadata'].get('preset')} "
+        f"aiPreset={ai_champion_policy_exports['metadata'].get('preset')}"
+    )
 
 
 def main():
     args = parse_args()
+    if args.policy_only:
+        run_policy_only()
+        return
     if not BANPICK_DATA.exists():
         raise SystemExit(
             "Required file is missing: "
