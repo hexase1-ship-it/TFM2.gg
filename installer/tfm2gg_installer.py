@@ -60,6 +60,9 @@ DASHBOARD_SHELL_EXCLUDED_NAMES = {"resources"}
 MOD_PACKAGE_DIR_NAME = "tfm2_meta_item_delegate (팀파매.gg 통계 아이템 자동 설정 애드온 모드)"
 META_TIER_MOD_ID = "tfm2_meta_champion_tiers"
 AI_BANPICK_MOD_ID = "tfm2_ai_banpick_probe"
+CHAMPION_VIEW_COMPAT_MOD_ID = "tfm2gg_champion_view_compat"
+CHAMPION_VIEW_ASSET_KEY = "asset/base/style/champion_view"
+CHAMPION_VIEW_COMPAT_REMAP = f"asset/{CHAMPION_VIEW_COMPAT_MOD_ID}/style/champion_view"
 SOURCE_DASHBOARD_DIR_NAME = "TFM2_Meta_Dashboard_v0.3.3 (팀파매.gg)"
 
 EXPECTED_GAME_FILES = {
@@ -594,12 +597,194 @@ class InstallerModel:
             ids.append(str(champion_id or file_path.stem))
         return tuple(ids)
 
-    def mod_has_style_override(self, mod_root: Path) -> bool:
+    def mod_override_row(self, mod_root: Path, asset_key: str) -> dict:
         override_info = read_json(mod_root / "mod.override_info", {})
         if not isinstance(override_info, dict):
-            return False
-        row = override_info.get("asset/base/style/champion_view")
-        return isinstance(row, dict) and str(row.get("type") or "").lower() == "override"
+            return {}
+        row = override_info.get(asset_key)
+        return row if isinstance(row, dict) else {}
+
+    def mod_champion_view_merge_type(self, mod_root: Path) -> str:
+        row = self.mod_override_row(mod_root, CHAMPION_VIEW_ASSET_KEY)
+        return str(row.get("type") or "").strip().lower()
+
+    def champion_view_file_for_mod(self, mod_root: Path) -> Path:
+        row = self.mod_override_row(mod_root, CHAMPION_VIEW_ASSET_KEY)
+        remapping = str(row.get("remapping") or "").strip().replace("\\", "/")
+        if remapping.startswith("asset/"):
+            parts = remapping.split("/", 2)
+            if len(parts) == 3:
+                relative = Path(parts[2])
+                candidate = mod_root / relative
+                if candidate.suffix != ".champion_view":
+                    candidate = candidate.with_suffix(".champion_view")
+                if candidate.exists():
+                    return candidate
+        return mod_root / "style" / "champion_view.champion_view"
+
+    def load_champion_view_entries(self, mod_root: Path) -> dict:
+        data = read_json(self.champion_view_file_for_mod(mod_root), {})
+        if not isinstance(data, dict):
+            return {}
+        entries = data.get("entries")
+        if not isinstance(entries, dict):
+            return {}
+        return {str(key): value for key, value in entries.items() if isinstance(value, dict)}
+
+    def mod_has_style_override(self, mod_root: Path) -> bool:
+        return self.mod_champion_view_merge_type(mod_root) == "override"
+
+    def champion_view_compat_dir(self, game_dir: Path) -> Path:
+        return game_dir / "mods" / CHAMPION_VIEW_COMPAT_MOD_ID
+
+    def build_champion_view_compat_plan(self, game_dir: Path) -> dict:
+        config = self.read_mods_config(game_dir)
+        enabled_order = [str(item) for item in config.get("enabled_mods", []) if str(item) != CHAMPION_VIEW_COMPAT_MOD_ID]
+        enabled_index = {mod_id: index for index, mod_id in enumerate(enabled_order)}
+        active = [
+            row for row in self.discover_workshop_champion_mods(game_dir)
+            if row.enabled and row.mod_id in enabled_index
+        ]
+        active.sort(key=lambda row: enabled_index.get(row.mod_id, 10_000))
+
+        active_champion_ids: set[str] = set()
+        for row in active:
+            active_champion_ids.update(row.champion_ids)
+
+        entries: dict[str, dict] = {}
+        sources: dict[str, str] = {}
+        visible_after_current_order: set[str] = set()
+        override_mods: list[str] = []
+        merge_mods: list[str] = []
+        missing_style_ids: list[str] = []
+
+        for row in active:
+            merge_type = self.mod_champion_view_merge_type(row.path)
+            style_entries = self.load_champion_view_entries(row.path)
+            valid_ids = [champion_id for champion_id in row.champion_ids if champion_id in style_entries]
+            for champion_id in valid_ids:
+                entries[champion_id] = style_entries[champion_id]
+                sources[champion_id] = row.mod_id
+            missing_style_ids.extend(
+                champion_id for champion_id in row.champion_ids
+                if champion_id not in style_entries
+            )
+            if merge_type == "override":
+                override_mods.append(row.mod_id)
+                visible_after_current_order = {
+                    champion_id for champion_id in active_champion_ids
+                    if champion_id in style_entries
+                }
+            elif merge_type == "merge":
+                merge_mods.append(row.mod_id)
+                visible_after_current_order.update(valid_ids)
+
+        generated_ids = sorted(entries)
+        missing_after_order = sorted(
+            champion_id for champion_id in active_champion_ids
+            if champion_id not in visible_after_current_order and champion_id in entries
+        )
+        conflict_risk = len(override_mods) > 1 or bool(missing_after_order)
+        compat_dir = self.champion_view_compat_dir(game_dir)
+        config_enabled = [str(item) for item in config.get("enabled_mods", [])]
+        compat_enabled = CHAMPION_VIEW_COMPAT_MOD_ID in config_enabled
+        return {
+            "activeMods": [row.mod_id for row in active],
+            "activeChampionCount": len(active_champion_ids),
+            "generatedIds": generated_ids,
+            "entries": {champion_id: entries[champion_id] for champion_id in generated_ids},
+            "sources": sources,
+            "overrideMods": override_mods,
+            "mergeMods": merge_mods,
+            "missingAfterOrder": missing_after_order,
+            "missingStyleIds": sorted(set(missing_style_ids)),
+            "conflictRisk": conflict_risk,
+            "shouldInstall": bool(generated_ids and conflict_risk),
+            "installed": compat_dir.exists(),
+            "enabled": compat_enabled,
+            "loadLast": bool(config_enabled and config_enabled[-1] == CHAMPION_VIEW_COMPAT_MOD_ID),
+        }
+
+    def format_champion_view_compat_summary(self, plan: dict) -> str:
+        generated = len(plan.get("generatedIds") or [])
+        missing = len(plan.get("missingAfterOrder") or [])
+        override_count = len(plan.get("overrideMods") or [])
+        if plan.get("installed"):
+            tail = "마지막 로드" if plan.get("loadLast") else "순서 확인 필요"
+            return f"적용됨 {generated}개 / override {override_count}개 / 유실 {missing}개 / {tail}"
+        if plan.get("shouldInstall"):
+            return f"필요 {generated}개 / override {override_count}개 / 유실 {missing}개"
+        if generated:
+            return f"불필요 {generated}개 / override {override_count}개 / 유실 {missing}개"
+        return "불필요"
+
+    def sync_champion_view_compat(self, game_dir: Path, force: bool = False) -> dict:
+        plan = self.build_champion_view_compat_plan(game_dir)
+        if not force and not plan.get("shouldInstall") and not plan.get("installed"):
+            return plan
+        if not plan.get("generatedIds"):
+            if force:
+                raise RuntimeError("No active champion_view entries were found for enabled champion mods.")
+            return plan
+        if self.is_game_running():
+            raise RuntimeError("Teamfight Manager 2 is running. Close the game before changing champion mod compatibility files.")
+
+        compat_dir = self.champion_view_compat_dir(game_dir)
+        self.backup_existing(game_dir, [compat_dir])
+        if compat_dir.exists():
+            remove_known_path(game_dir, compat_dir)
+        (compat_dir / "style").mkdir(parents=True, exist_ok=True)
+
+        mod_info = {
+            "id": CHAMPION_VIEW_COMPAT_MOD_ID,
+            "mod_id": CHAMPION_VIEW_COMPAT_MOD_ID,
+            "name": "TFM2.gg Champion View Compatibility",
+            "author": "TFM2.gg",
+            "version": "0.1.0",
+            "last_updated": time.strftime("%Y-%m-%d"),
+            "description": "Generated local merge layer that restores champion_view entries lost by workshop override collisions.",
+            "dependencies": [{"mod_id": "base", "version": f">={TARGET_GAME_VERSION}"}],
+        }
+        override_info = {
+            CHAMPION_VIEW_ASSET_KEY: {
+                "remapping": CHAMPION_VIEW_COMPAT_REMAP,
+                "type": "merge",
+            }
+        }
+        manifest = {
+            "generatedAt": time.strftime("%Y-%m-%dT%H:%M:%S"),
+            "activeMods": plan.get("activeMods") or [],
+            "overrideMods": plan.get("overrideMods") or [],
+            "mergeMods": plan.get("mergeMods") or [],
+            "generatedIds": plan.get("generatedIds") or [],
+            "missingAfterOrder": plan.get("missingAfterOrder") or [],
+            "missingStyleIds": plan.get("missingStyleIds") or [],
+            "sources": plan.get("sources") or {},
+        }
+
+        write_json(compat_dir / "mod.mod_info", mod_info)
+        write_json(compat_dir / "mod.override_info", override_info)
+        write_json(compat_dir / "style" / "champion_view.champion_view", {"entries": plan["entries"]})
+        write_json(compat_dir / "tfm2gg_compat_manifest.json", manifest)
+
+        config = self.read_mods_config(game_dir)
+        enabled_mods = [str(item) for item in config.get("enabled_mods", []) if str(item) != CHAMPION_VIEW_COMPAT_MOD_ID]
+        enabled_mods.append(CHAMPION_VIEW_COMPAT_MOD_ID)
+        config["enabled_mods"] = enabled_mods
+        self.write_mods_config(game_dir, config)
+        return self.build_champion_view_compat_plan(game_dir)
+
+    def remove_champion_view_compat(self, game_dir: Path) -> None:
+        if self.is_game_running():
+            raise RuntimeError("Teamfight Manager 2 is running. Close the game before removing champion mod compatibility files.")
+        compat_dir = self.champion_view_compat_dir(game_dir)
+        self.backup_existing(game_dir, [compat_dir])
+        if compat_dir.exists():
+            remove_known_path(game_dir, compat_dir)
+        config = self.read_mods_config(game_dir)
+        enabled_mods = [str(item) for item in config.get("enabled_mods", []) if str(item) != CHAMPION_VIEW_COMPAT_MOD_ID]
+        config["enabled_mods"] = enabled_mods
+        self.write_mods_config(game_dir, config)
 
     def discover_workshop_champion_mods(self, game_dir: Path) -> list[WorkshopChampionMod]:
         config = self.read_mods_config(game_dir)
@@ -827,12 +1012,14 @@ class InstallerModel:
         self.install_dashboard_shell(game_dir, source_root)
         self.install_dashboard(game_dir, source_root)
         self.install_addons(game_dir, CORE_ADDON_IDS + self.installed_optional_addon_ids(game_dir), source_root)
+        self.sync_champion_view_compat(game_dir)
 
     def remove_all(self, game_dir: Path) -> None:
         ensure_writable_files(self.install_lock_paths(game_dir))
         targets = [
             self.dashboard_install_dir(game_dir),
             *[game_dir / "mods" / addon.mod_id for addon in ADDON_PACKAGES],
+            self.champion_view_compat_dir(game_dir),
             *self.legacy_dashboard_targets(game_dir),
         ]
         self.backup_existing(game_dir, [target for target in targets if target.exists()])
@@ -840,6 +1027,10 @@ class InstallerModel:
             if target.exists():
                 remove_known_path(game_dir, target)
         self.remove_empty_legacy_dirs(game_dir)
+        config = self.read_mods_config(game_dir)
+        enabled_mods = [str(item) for item in config.get("enabled_mods", []) if str(item) != CHAMPION_VIEW_COMPAT_MOD_ID]
+        config["enabled_mods"] = enabled_mods
+        self.write_mods_config(game_dir, config)
 
     def migrate_legacy_dashboard(self, game_dir: Path) -> None:
         targets = [target for target in self.legacy_dashboard_targets(game_dir) if target.exists()]
@@ -913,6 +1104,11 @@ class InstallerModel:
             },
         }
         installed_manifest = self.installed_manifest(game_dir)
+        try:
+            champion_view_compat = self.build_champion_view_compat_plan(game_dir)
+            champion_view_compat["summary"] = self.format_champion_view_compat_summary(champion_view_compat)
+        except Exception as exc:
+            champion_view_compat = {"summary": f"check failed: {exc}", "installed": False, "enabled": False}
         installed_version = self.package_version(installed_manifest)
         has_legacy = legacy_dashboard.exists() or legacy_dashboard_shell.exists()
         any_addon_installed = any(row["installed"] for row in addon_status.values())
@@ -946,6 +1142,7 @@ class InstallerModel:
             "layoutVersion": layout_version,
             "layoutStatus": layout_status,
             "installComplete": install_complete,
+            "championViewCompat": champion_view_compat,
             "dashboardInstallDir": str(self.dashboard_install_dir(game_dir)),
             "dashboardSize": dir_size(dashboard),
             "dashboardShellSize": dashboard_shell.stat().st_size if dashboard_shell.exists() else 0,
@@ -1592,6 +1789,7 @@ class Tfm2InstallerApp(tk.Tk):
         shell_state = "설치됨" if installed["dashboardShellInstalled"] else "없음"
         dashboard_state = "설치됨" if installed["dashboardInstalled"] else "없음"
         install_lines = [
+            f"챔프 호환: {installed['championViewCompat']['summary']}",
             f"실행/대시보드: {shell_state} / {dashboard_state}",
             f"설치 구조: {installed['layoutStatus']}",
             f"애드온: {' / '.join(addon_lines)}",
@@ -1784,9 +1982,15 @@ class Tfm2InstallerApp(tk.Tk):
         def refresh_tree():
             rows_by_iid.clear()
             tree.delete(*tree.get_children())
-            mods = self.model.discover_workshop_champion_mods(self.current_game_dir())
+            game_dir = self.current_game_dir()
+            mods = self.model.discover_workshop_champion_mods(game_dir)
             active_count = sum(1 for row in mods if row.enabled)
-            info_var.set(f"감지된 챔피언 모드 {len(mods)}개 · 활성 {active_count}개")
+            try:
+                compat_plan = self.model.build_champion_view_compat_plan(game_dir)
+                compat_summary = self.model.format_champion_view_compat_summary(compat_plan)
+            except Exception as exc:
+                compat_summary = f"check failed: {exc}"
+            info_var.set(f"감지된 챔프 모드 {len(mods)}개 / 활성 {active_count}개 / 호환 패치 {compat_summary}")
             for index, row in enumerate(mods):
                 warnings = []
                 if row.has_style_override:
@@ -1821,13 +2025,39 @@ class Tfm2InstallerApp(tk.Tk):
             if not messagebox.askyesno("챔피언 모드", f"{row.name}\n\n이 모드를 {action}할까요?\n게임 실행 중에는 적용되지 않습니다."):
                 return
             try:
-                self.model.set_workshop_champion_mod_enabled(self.current_game_dir(), row.mod_id, enabled)
+                game_dir = self.current_game_dir()
+                self.model.set_workshop_champion_mod_enabled(game_dir, row.mod_id, enabled)
+                compat_plan = self.model.sync_champion_view_compat(game_dir)
+                self.log(f"champion_view compat: {self.model.format_champion_view_compat_summary(compat_plan)}")
                 self.log(f"챔피언 모드 {action}: {row.mod_id}")
                 refresh_tree()
                 self.refresh_status()
                 messagebox.showinfo("챔피언 모드", f"{row.name} {action} 완료\n게임을 재시작해야 적용됩니다.")
             except Exception as exc:
                 messagebox.showerror("챔피언 모드", str(exc))
+
+        def rebuild_compat():
+            try:
+                plan = self.model.sync_champion_view_compat(self.current_game_dir(), force=True)
+                summary = self.model.format_champion_view_compat_summary(plan)
+                self.log(f"champion_view compat rebuilt: {summary}")
+                refresh_tree()
+                self.refresh_status()
+                messagebox.showinfo("챔프 모드 호환 패치", f"호환 패치를 적용했습니다.\n{summary}")
+            except Exception as exc:
+                messagebox.showerror("챔프 모드 호환 패치", str(exc))
+
+        def remove_compat():
+            if not messagebox.askyesno("챔프 모드 호환 패치", "TFM2.gg가 생성한 champion_view 호환 패치 모드를 제거할까요?"):
+                return
+            try:
+                self.model.remove_champion_view_compat(self.current_game_dir())
+                self.log("champion_view compat removed")
+                refresh_tree()
+                self.refresh_status()
+                messagebox.showinfo("챔프 모드 호환 패치", "호환 패치를 제거했습니다.")
+            except Exception as exc:
+                messagebox.showerror("챔프 모드 호환 패치", str(exc))
 
         def open_folder():
             row = selected_row()
@@ -1836,6 +2066,8 @@ class Tfm2InstallerApp(tk.Tk):
 
         btns = ttk.Frame(frame)
         btns.grid(row=3, column=0, columnspan=2, sticky="ew", pady=(12, 0))
+        ttk.Button(btns, text="호환 패치 적용", style="Accent.TButton", command=rebuild_compat).pack(side="left", padx=(0, 8))
+        ttk.Button(btns, text="호환 패치 제거", command=remove_compat).pack(side="left", padx=(0, 8))
         ttk.Button(btns, text="활성화", style="Primary.TButton", command=lambda: set_enabled(True)).pack(side="left")
         ttk.Button(btns, text="비활성화", style="Danger.TButton", command=lambda: set_enabled(False)).pack(side="left", padx=(8, 0))
         ttk.Button(btns, text="폴더 열기", command=open_folder).pack(side="left", padx=(8, 0))
