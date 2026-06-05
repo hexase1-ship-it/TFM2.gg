@@ -1215,7 +1215,8 @@ function compareChampions(a, b) {
 function spriteHtml(asset, className = "champion-sprite", targetHeight = 42) {
   if (!asset || !asset.frame) return `<div class="${className}"></div>`;
   const frame = asset.frame;
-  const scale = targetHeight / Math.max(1, frame.h);
+  const renderScale = asset.external ? Number(asset.renderScale || 1.25) : 1;
+  const scale = (targetHeight * renderScale) / Math.max(1, frame.h);
   const style = [
     `width:${Math.max(1, frame.w * scale)}px`,
     `height:${Math.max(1, frame.h * scale)}px`,
@@ -2906,7 +2907,7 @@ function renderMatchView() {
   const allRows = DATA.matchAnalysis || [];
   if (!allRows.length) {
     if (DATA.sources.metaExportUsable === false) {
-      container.innerHTML = `<p class="notice warning-notice">Meta Exporter 또는 Save Probe가 현재 게임 0.4.9 DB 구조 일부와 맞지 않아 예전 리플레이 export 파일을 무시했어. 0.4.9용 진단 도구가 정상 추출될 때까지 신규 경기 분석은 제한될 수 있어.</p>`;
+      container.innerHTML = `<p class="notice warning-notice">Meta Exporter 또는 Save Probe가 현재 게임 0.4.10 DB 구조 일부와 맞지 않아 예전 리플레이 export 파일을 무시했어. 0.4.10용 진단 도구가 정상 추출될 때까지 신규 경기 분석은 제한될 수 있어.</p>`;
       return;
     }
     if (DATA.sources.saveProbe) {

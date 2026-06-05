@@ -326,7 +326,7 @@ try {
     $sha = "nogit"
     $fullSha = "nogit"
 }
-$version = "0.4.9+$sha"
+$version = "0.4.10+$sha"
 $manifest = [ordered]@{
     name = "TFM2.gg"
     packageVersion = $version
@@ -334,12 +334,12 @@ $manifest = [ordered]@{
     dashboardRevision = $dashboardRevision
     packageLayoutVersion = 3
     dashboardInstallDir = "TFM2.gg"
-    targetGameVersion = "0.4.9"
+    targetGameVersion = "0.4.10"
     repository = "hexase1-ship-it/TFM2.gg"
     releaseAsset = "TFM2.gg_Distribution.zip"
     expectedGameFiles = [ordered]@{
-        "TeamfightManager2.exe" = 63962624
-        "bundle.game_data" = 1119929218
+        "TeamfightManager2.exe" = 63975424
+        "bundle.game_data" = 1119930515
     }
     addons = @(
         [ordered]@{ modId = "tfm2_meta_item_delegate"; label = "Meta Item Delegate"; required = $true },
@@ -361,7 +361,7 @@ $updateInfo = [ordered]@{
     sourceRevision = $fullSha
     dashboardRevision = $dashboardRevision
     packageLayoutVersion = 3
-    targetGameVersion = "0.4.9"
+    targetGameVersion = "0.4.10"
     repository = "hexase1-ship-it/TFM2.gg"
     releaseAsset = "TFM2.gg_Distribution.zip"
     generatedAt = $manifest.generatedAt

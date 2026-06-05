@@ -143,7 +143,7 @@ tfm2_meta_dashboard\_last_refresh_log.txt
 - `runtime/python` 폴더를 삭제해서 내장 Python을 찾지 못함
 - 게임 업데이트로 `save_probe`와 SDK 버전이 맞지 않음
 
-0.4.9 대응판은 0.4.9 SDK 기반 `tools/tfm2_save_probe.exe`가 0.4.9 세이브를 정상 디코드하는지 검증했습니다. 선택한 최신 세이브 디코드가 실패하면 기본적으로 갱신을 실패 처리해서 다른 세이브로 조용히 바뀌지 않게 했습니다. 구버전처럼 최근 정상 세이브 fallback을 강제로 쓰려면 `TFM2_ALLOW_SAVE_PROBE_FALLBACK=1` 환경변수를 켠 뒤 실행하세요.
+0.4.10 대응판은 0.4.10 SDK 기반 `tools/tfm2_save_probe.exe`가 0.4.10 세이브를 정상 디코드하는지 검증했습니다. 선택한 최신 세이브 디코드가 실패하면 기본적으로 갱신을 실패 처리해서 다른 세이브로 조용히 바뀌지 않게 했습니다. 구버전처럼 최근 정상 세이브 fallback을 강제로 쓰려면 `TFM2_ALLOW_SAVE_PROBE_FALLBACK=1` 환경변수를 켠 뒤 실행하세요.
 
 이전 데이터가 보이면 브라우저에서 `Ctrl + F5`로 강력 새로고침하세요. 우측 상단 생성 시간이 방금 갱신한 시간인지 확인하면 됩니다.
 

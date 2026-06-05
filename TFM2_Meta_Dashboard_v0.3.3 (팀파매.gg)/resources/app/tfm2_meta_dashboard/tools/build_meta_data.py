@@ -1,5 +1,6 @@
 import gzip
 import argparse
+import base64
 import json
 import math
 import os
@@ -13,6 +14,8 @@ from pathlib import Path
 ROOT = Path(os.environ.get("TFM2_GAME_ROOT", Path(__file__).resolve().parents[2])).resolve()
 DASHBOARD = Path(__file__).resolve().parents[1]
 REPO_ROOT = DASHBOARD.parents[3] if len(DASHBOARD.parents) > 3 else ROOT
+STEAM_APP_ID = "3009300"
+MAX_EXTERNAL_SPRITE_BYTES = 5 * 1024 * 1024
 OUT = DASHBOARD / "data" / "meta-data.js"
 SCORE_MODEL_SPEC = DASHBOARD / "data" / "score-model-spec.json"
 POLICY_SETTINGS = DASHBOARD / "data" / "policy-settings.json"
@@ -63,6 +66,69 @@ POLICY_TIER_MAP = {"OP": "S", "1": "A", "2": "B", "3": "C", "4": "D", "-": "No"}
 POLICY_TIER_SORT = {"S": 6, "A": 5, "B": 4, "C": 3, "D": 2, "No": 1}
 TIER_POLICY_OVERALL_ANCHORS = {"S": 90.0, "A": 75.0, "B": 62.0, "C": 50.0, "D": 35.0}
 AI_POLICY_OVERALL_ANCHORS = {"S": 80.0, "A": 70.0, "B": 60.0, "C": 50.0, "D": 40.0}
+BASE_CANDIDATE_ORDER = [
+    "fighter",
+    "knight",
+    "swordman",
+    "archer",
+    "soldier",
+    "priest",
+    "pythoness",
+    "monk",
+    "pyromancer",
+    "ice_mage",
+    "ninja",
+    "magic_knight",
+    "berserker",
+    "executioner",
+    "lancer",
+    "ogre",
+    "dual_blader",
+    "cavalry_knight",
+    "gunner",
+    "pole_warrior",
+    "jiangshi",
+    "gambler",
+    "hammerer",
+    "demon",
+    "vampire",
+    "spirit_caller",
+    "boomerang_hunter",
+    "inquisitor",
+    "shield_bearer",
+    "whip_master",
+    "werewolf",
+    "dokkaebi",
+    "necromancer",
+    "bard",
+    "barrier_magician",
+    "chef",
+    "clown",
+    "dancer",
+    "dark_mage",
+    "exorcist",
+    "ghost",
+    "illusionist",
+    "lightning_mage",
+    "plague_doctor",
+    "poison_dart_hunter",
+    "shadowmancer",
+    "taoist",
+    "siege_breaker",
+    "android",
+    "druid",
+    "prisoner",
+    "bomber",
+    "voodoo_shaman",
+    "white_mage",
+    "wind_mage",
+    "enchanter",
+    "hitman",
+    "guardian_spirit",
+    "hunter",
+    "circus_blade",
+]
+BASE_CANDIDATE_INDEX = {champion_id: index for index, champion_id in enumerate(BASE_CANDIDATE_ORDER)}
 INTERNAL_SCORE_FIELDS = [
     "pickOpportunities",
     "banOpportunities",
@@ -156,6 +222,338 @@ def load_policy_settings():
     except (OSError, json.JSONDecodeError):
         return {}
     return data if isinstance(data, dict) else {}
+
+
+def load_json_file(path, default=None):
+    try:
+        return json.loads(Path(path).read_text(encoding="utf-8-sig"))
+    except (OSError, json.JSONDecodeError):
+        return default
+
+
+def detect_game_root_for_mods(root=ROOT):
+    candidates = []
+    env_root = os.environ.get("TFM2_GAME_INSTALL_DIR") or os.environ.get("TFM2_GAME_DIR")
+    if env_root:
+        candidates.append(Path(env_root))
+    root = Path(root)
+    candidates.append(root)
+    for parent in root.parents:
+        candidates.append(parent)
+    candidates.append(Path(r"C:\Program Files (x86)\Steam\steamapps\common\Teamfight Manager2"))
+    for candidate in candidates:
+        try:
+            resolved = candidate.expanduser().resolve()
+        except OSError:
+            continue
+        if (resolved / "TeamfightManager2.exe").exists():
+            return resolved
+    return root
+
+
+def read_enabled_mod_ids(game_root=ROOT):
+    data = load_json_file(Path(game_root) / "config" / "game" / "mods.json", {})
+    if not isinstance(data, dict):
+        return []
+    return [str(item) for item in data.get("enabled_mods", []) if str(item)]
+
+
+def workshop_content_dirs(game_root=ROOT):
+    candidates = []
+    try:
+        candidates.append(Path(game_root).resolve().parents[1] / "workshop" / "content" / STEAM_APP_ID)
+    except IndexError:
+        pass
+    return [path for path in candidates if path.exists()]
+
+
+def find_workshop_mod_root(item_dir):
+    direct = item_dir / "mod.mod_info"
+    if direct.exists():
+        return item_dir, direct
+    try:
+        children = sorted(path for path in item_dir.iterdir() if path.is_dir())
+    except OSError:
+        return None
+    for child in children:
+        info = child / "mod.mod_info"
+        if info.exists():
+            return child, info
+    return None
+
+
+def discover_workshop_champion_mods(game_root=ROOT):
+    out = {}
+    for content_dir in workshop_content_dirs(game_root):
+        try:
+            item_dirs = sorted(path for path in content_dir.iterdir() if path.is_dir())
+        except OSError:
+            continue
+        for item_dir in item_dirs:
+            located = find_workshop_mod_root(item_dir)
+            if not located:
+                continue
+            mod_root, info_path = located
+            info = load_json_file(info_path, {})
+            if not isinstance(info, dict):
+                continue
+            mod_id = str(info.get("mod_id") or info.get("id") or "").strip()
+            if not mod_id:
+                continue
+            champion_dir = mod_root / "champion"
+            champion_files = sorted(champion_dir.glob("*.data_champion")) if champion_dir.exists() else []
+            if not champion_files:
+                continue
+            out[mod_id] = {
+                "workshopId": item_dir.name,
+                "modId": mod_id,
+                "name": info.get("name") or mod_id,
+                "version": info.get("version") or "-",
+                "author": info.get("author") or "-",
+                "path": str(mod_root),
+                "championFiles": champion_files,
+            }
+    return out
+
+
+def load_mod_champion_i18n(mod_root):
+    data = load_json_file(Path(mod_root) / "text" / "champion.i18n", {})
+    if not isinstance(data, dict):
+        return {}
+    for lang in ["ko", "en", "ja", "zh-CN"]:
+        desc = ((data.get(lang) or {}).get("description") or {})
+        if desc:
+            return desc
+    return {}
+
+
+def png_dimensions(path):
+    try:
+        with Path(path).open("rb") as handle:
+            header = handle.read(24)
+    except OSError:
+        return None
+    if len(header) < 24 or not header.startswith(b"\x89PNG\r\n\x1a\n"):
+        return None
+    return struct.unpack(">II", header[16:24])
+
+
+def resolve_external_sprite_base(mod_root, mod_id, source):
+    if not source:
+        return None
+    source_text = str(source).replace("\\", "/").strip().rstrip("/")
+    if source_text.endswith("#sheet.png"):
+        source_text = source_text[: -len("#sheet.png")]
+    if not source_text:
+        return None
+
+    parts = [part for part in source_text.split("/") if part]
+    candidates = []
+    if len(parts) > 2 and parts[0] == "asset":
+        candidates.append(Path(mod_root).joinpath(*parts[2:]))
+    if len(parts) > 1:
+        candidates.append(Path(mod_root).joinpath(*parts[1:]))
+    candidates.append(Path(mod_root).joinpath(*parts))
+
+    seen = set()
+    for candidate in candidates:
+        key = str(candidate)
+        if key in seen:
+            continue
+        seen.add(key)
+        if Path(f"{candidate}#sheet.png").exists():
+            return candidate
+    return None
+
+
+def load_external_idle_frame(anim_path):
+    data = load_json_file(anim_path, {})
+    anims = data.get("anims") if isinstance(data, dict) else {}
+    if not isinstance(anims, dict):
+        return None
+
+    ordered_tags = ["idle", "stand", "run", "attack", "skill", "skill2", "ult", "dead"]
+    for tag in ordered_tags:
+        anim = anims.get(tag)
+        frames = anim.get("frames") if isinstance(anim, dict) else None
+        if frames:
+            frame_data = (frames[0] or {}).get("data") if isinstance(frames[0], dict) else None
+            if isinstance(frame_data, dict):
+                return {
+                    "x": int(float(frame_data.get("x") or 0)),
+                    "y": int(float(frame_data.get("y") or 0)),
+                    "w": max(1, int(float(frame_data.get("w") or 1))),
+                    "h": max(1, int(float(frame_data.get("h") or 1))),
+                }
+
+    for anim in anims.values():
+        frames = anim.get("frames") if isinstance(anim, dict) else None
+        if not frames:
+            continue
+        frame_data = (frames[0] or {}).get("data") if isinstance(frames[0], dict) else None
+        if isinstance(frame_data, dict):
+            return {
+                "x": int(float(frame_data.get("x") or 0)),
+                "y": int(float(frame_data.get("y") or 0)),
+                "w": max(1, int(float(frame_data.get("w") or 1))),
+                "h": max(1, int(float(frame_data.get("h") or 1))),
+            }
+    return None
+
+
+def external_champion_asset(data, mod_meta):
+    source = data.get("sprite")
+    asset = {"external": True, "source": source}
+    mod_root = Path(mod_meta.get("path") or "")
+    base_path = resolve_external_sprite_base(mod_root, mod_meta.get("modId"), source)
+    if not base_path:
+        return asset
+
+    sheet_path = Path(f"{base_path}#sheet.png")
+    anim_path = Path(f"{base_path}#anim.fanim")
+    dimensions = png_dimensions(sheet_path)
+    frame = load_external_idle_frame(anim_path)
+    if not dimensions or not frame:
+        return asset
+
+    try:
+        sheet_bytes = sheet_path.read_bytes()
+    except OSError:
+        return asset
+    if len(sheet_bytes) > MAX_EXTERNAL_SPRITE_BYTES:
+        return asset
+
+    asset.update(
+        {
+            "sheet": "data:image/png;base64," + base64.b64encode(sheet_bytes).decode("ascii"),
+            "sheetWidth": dimensions[0],
+            "sheetHeight": dimensions[1],
+            "frame": frame,
+            "renderScale": 1.45 if frame["h"] >= 72 else 1.2,
+        }
+    )
+    return asset
+
+
+def map_entity_stats(raw):
+    raw = raw or {}
+    move_speed = stat_number(raw.get("move_speed"))
+    out = {
+        "attack": stat_number(raw.get("attack")) or 0,
+        "magicPower": stat_number(raw.get("magic_power")) or 0,
+        "hp": stat_number(raw.get("hp")) or 0,
+        "defence": stat_number(raw.get("defence")) or 0,
+        "magicResistance": stat_number(raw.get("magic_resistance")) or 0,
+    }
+    if move_speed is not None:
+        out["moveSpeed"] = move_speed
+        out["moveSpeedDisplay"] = round(move_speed * 0.06, 2)
+    return out
+
+
+def infer_role_fit(category, tags):
+    normalized = {str(tag).lower() for tag in tags or []}
+    category_key = str(category or "").lower()
+    fit = {"top": 0.2, "jungle": 0.2, "mid": 0.2, "bot": 0.2, "support": 0.2}
+    if "range" in normalized or category_key == "range":
+        fit.update({"bot": 0.7, "mid": 0.35})
+    if "ap" in normalized or "magic" in normalized or category_key == "magician":
+        fit.update({"mid": 0.7, "support": 0.35})
+    if "tank" in normalized or "melee" in normalized or category_key == "melee":
+        fit.update({"top": 0.65, "jungle": 0.45})
+    if "heal" in normalized or "shield" in normalized:
+        fit["support"] = max(fit.get("support", 0), 0.7)
+    return fit
+
+
+def best_role_from_fit(role_fit):
+    return max(role_fit.items(), key=lambda item: item[1])[0] if role_fit else "mid"
+
+
+def external_skill_payload(champion_id, key, action, translations):
+    action = action or {}
+    description = translations.get(key) or action.get("description") or ""
+    return {
+        "id": key,
+        "level": {"skill": 1, "skill2": 3, "ult": 5}.get(key, 1),
+        "iconKey": f"{champion_id}_{key}",
+        "cooltime": format_cooltime_ticks(action.get("cooltime")) or "-",
+        "description": description,
+    }
+
+
+def external_champion_payload(file_path, mod_meta, translations):
+    data = load_json_file(file_path, {})
+    if not isinstance(data, dict):
+        return None
+    champion_id = str(data.get("id") or Path(file_path).stem)
+    text = translations.get(champion_id) or {}
+    category = data.get("category") or "Unknown"
+    raw_tags = [str(tag) for tag in (data.get("tags") or [])]
+    tags = sorted({*raw_tags, str(category)})
+    role_fit = infer_role_fit(category, tags)
+    return {
+        "id": champion_id,
+        "name": text.get("name") or champion_id,
+        "category": category,
+        "tags": tags,
+        "rawTags": raw_tags,
+        "description": {
+            key: text.get(key) or (data.get(key) or {}).get("description") or ""
+            for key in ["attack", "skill", "skill2", "ult"]
+        },
+        "stats": map_entity_stats(data.get("stat")),
+        "growth": map_entity_stats(data.get("growth")),
+        "skills": [
+            external_skill_payload(champion_id, key, data.get(key), text)
+            for key in ["skill", "skill2", "ult"]
+        ],
+        "metrics": {},
+        "roleFit": role_fit,
+        "bestRole": best_role_from_fit(role_fit),
+        "asset": external_champion_asset(data, mod_meta),
+        "overall": None,
+        "tier": "-",
+        "modSource": {
+            "type": "workshop",
+            "workshopId": mod_meta.get("workshopId"),
+            "modId": mod_meta.get("modId"),
+            "modName": mod_meta.get("name"),
+            "version": mod_meta.get("version"),
+        },
+    }
+
+
+def load_active_external_champions(champions, game_root=ROOT):
+    enabled_mod_ids = read_enabled_mod_ids(game_root)
+    workshop_mods = discover_workshop_champion_mods(game_root)
+    existing = {champ.get("id") for champ in champions}
+    loaded_mods = []
+    added = []
+    for mod_id in enabled_mod_ids:
+        mod_meta = workshop_mods.get(mod_id)
+        if not mod_meta:
+            continue
+        translations = load_mod_champion_i18n(mod_meta["path"])
+        mod_champions = []
+        for champion_file in mod_meta["championFiles"]:
+            champ = external_champion_payload(champion_file, mod_meta, translations)
+            if not champ or champ["id"] in existing:
+                continue
+            champions.append(champ)
+            existing.add(champ["id"])
+            mod_champions.append(champ["id"])
+            added.append(champ["id"])
+        loaded_mods.append(
+            {
+                "modId": mod_id,
+                "name": mod_meta.get("name"),
+                "version": mod_meta.get("version"),
+                "workshopId": mod_meta.get("workshopId"),
+                "champions": mod_champions,
+            }
+        )
+    return {"mods": loaded_mods, "championIds": added}
 
 
 def resolve_policy_preset():
@@ -861,6 +1259,7 @@ def build_policy_exports(champions, stats, generated_at, save_path, patch_key, s
     sample_info = effective_policy_sample_info(stats, replay_date_status)
     context = build_policy_score_context(stats, sample_info, score_model_spec)
     entries = []
+    assign_candidate_indexes(champions)
     for champ in champions:
         champion_id = champ["id"]
         stat = stats.get(champion_id, {})
@@ -868,6 +1267,7 @@ def build_policy_exports(champions, stats, generated_at, save_path, patch_key, s
         entry = {
             "championId": champion_id,
             "championName": champ.get("name") or champion_id,
+            "candidateIndex": champ.get("candidateIndex"),
             "pickCount": int(stat.get("pickCount") or 0),
             "winRate": stat.get("winRate"),
             **info,
@@ -901,6 +1301,7 @@ def build_policy_exports(champions, stats, generated_at, save_path, patch_key, s
             {
                 "championId": entry["championId"],
                 "championName": entry["championName"],
+                "candidateIndex": entry.get("candidateIndex"),
                 "tier": policy_tier,
                 "aiTier": policy_tier if entry["eligible"] else "C",
                 "tierOverall": round1(tier_overall) if tier_overall is not None else None,
@@ -965,6 +1366,7 @@ def build_policy_exports(champions, stats, generated_at, save_path, patch_key, s
             "aiChampion": {
                 "tierField": "aiTier",
                 "overallField": "aiOverall",
+                "candidateIndexField": "candidateIndex",
                 "semantic": "ai_bias_scaled_from_meta_tier",
                 "anchors": AI_POLICY_OVERALL_ANCHORS,
                 "nativeBiasFormula": "clamp((overall - 50) / 20, -1.5, 1.5)",
@@ -980,7 +1382,18 @@ def render_policy_tsv(policy, profile_key):
     profile = (meta.get("policyProfiles") or {}).get(profile_key) or {}
     tier_field = profile.get("tierField") or "tier"
     overall_field = profile.get("overallField") or "tierOverall"
+    candidate_index_field = profile.get("candidateIndexField")
     native_bias_formula = profile.get("nativeBiasFormula") or "-"
+    format_line = (
+        "# Format: champion_id<TAB>tier<TAB>overall<TAB>candidate_index"
+        if candidate_index_field
+        else "# Format: champion_id<TAB>tier<TAB>overall"
+    )
+    header_line = (
+        "# champion_id\ttier\toverall\tcandidate_index"
+        if candidate_index_field
+        else "# champion_id\ttier\toverall"
+    )
     low_sample_note = (
         "# Non-eligible or low-sample champions are emitted as No with blank overall."
         if profile_key == "championTier"
@@ -1007,22 +1420,29 @@ def render_policy_tsv(policy, profile_key):
         f"# OverallNote: {profile.get('note')}",
         f"# OverallAnchors: {json.dumps(profile.get('anchors') or {}, sort_keys=True, ensure_ascii=False)}",
         f"# NativeBiasFormula: {native_bias_formula}",
-        "# Format: champion_id<TAB>tier<TAB>overall",
+        format_line,
         "# For No tier, overall is omitted so the native addon falls back to the tier column.",
         low_sample_note,
-        "# champion_id\ttier\toverall",
+        header_line,
     ]
     for row in policy["rows"]:
         tier = row.get(tier_field) or row.get("tier") or "C"
         overall_value = row.get(overall_field)
+        candidate_index = row.get(candidate_index_field) if candidate_index_field else None
         try:
             overall = float(overall_value)
         except (TypeError, ValueError):
             overall = None
+        suffix = ""
+        if candidate_index_field:
+            try:
+                suffix = f"\t{int(candidate_index)}"
+            except (TypeError, ValueError):
+                suffix = "\t"
         if overall is None or not math.isfinite(overall):
-            lines.append(f"{row['championId']}\t{tier}")
+            lines.append(f"{row['championId']}\t{tier}{suffix}")
         else:
-            lines.append(f"{row['championId']}\t{tier}\t{round1(overall):.1f}")
+            lines.append(f"{row['championId']}\t{tier}\t{round1(overall):.1f}{suffix}")
     return "\n".join(lines) + "\n"
 
 
@@ -1123,6 +1543,7 @@ if EXPLICIT_EXPORT_DIR:
     EXPORT_DIR = Path(os.environ["TFM2_META_EXPORT_DIR"]).expanduser().resolve()
 else:
     EXPORT_DIR = next((path / "meta_export" for path in DIAG_DIRS if (path / "meta_export").exists()), DIAG_DIR / "meta_export")
+SAVE_PROBE_SNAPSHOT_DIR = DASHBOARD / "data" / "save_probe_snapshot"
 
 
 def looks_like_save(path: Path):
@@ -2146,6 +2567,67 @@ def load_champion_debug_values(path, champion_ids):
             "rawActions": raw_actions,
         }
     return out
+
+
+def parse_champion_candidate_order(path, champion_ids):
+    """Return game candidate order from save_probe ChampionInfoSheet when exported."""
+    if not path or not Path(path).exists():
+        return []
+    champion_set = set(champion_ids or [])
+    if not champion_set:
+        return []
+    try:
+        text = Path(path).read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return []
+
+    order = []
+    seen = set()
+    field_re = re.compile(r"^    ([A-Za-z_][A-Za-z0-9_]*):\s+[A-Za-z0-9_]+ChampionInfo\s*\{")
+    for line in text.splitlines():
+        match = field_re.match(line)
+        if not match:
+            continue
+        champion_id = match.group(1)
+        if champion_id in champion_set and champion_id not in seen:
+            seen.add(champion_id)
+            order.append(champion_id)
+    return order
+
+
+def assign_candidate_indexes(champions, candidate_order=None):
+    """Attach draft candidate indexes used by the native AI draft hook policy TSV."""
+    if not champions:
+        return {}
+
+    index_map = {}
+    for index, champion_id in enumerate(candidate_order or []):
+        if champion_id not in index_map:
+            index_map[champion_id] = index
+    if candidate_order is None:
+        for champ in champions:
+            champion_id = champ.get("id")
+            try:
+                candidate_index = int(champ.get("candidateIndex"))
+            except (TypeError, ValueError):
+                continue
+            if champion_id and champion_id not in index_map:
+                index_map[champion_id] = candidate_index
+    for champion_id, index in BASE_CANDIDATE_INDEX.items():
+        index_map.setdefault(champion_id, index)
+
+    next_index = max(index_map.values(), default=-1) + 1
+    for champ in champions:
+        champion_id = champ.get("id")
+        if not champion_id:
+            continue
+        candidate_index = index_map.get(champion_id)
+        if candidate_index is None:
+            candidate_index = next_index
+            next_index += 1
+            index_map[champion_id] = candidate_index
+        champ["candidateIndex"] = int(candidate_index)
+    return index_map
 
 
 def stat_number(value):
@@ -3542,36 +4024,54 @@ def meta_export_counts_look_sane(fields):
     return True
 
 
-def meta_export_data_paths():
+def meta_export_data_paths(export_dir=None):
+    root = export_dir or EXPORT_DIR
     return [
-        EXPORT_DIR / "teams.debug.txt",
-        EXPORT_DIR / "athletes.debug.txt",
-        EXPORT_DIR / "champion_patch_statistics.debug.txt",
-        EXPORT_DIR / "champion_patch_statistics.tsv",
-        EXPORT_DIR / "solo_rank_matches.debug.txt",
-        EXPORT_DIR / "match_replays.debug.txt",
-        EXPORT_DIR / "league_competitions.debug.txt",
-        EXPORT_DIR / "tournament_competitions.debug.txt",
-        EXPORT_DIR / "year_schedules.debug.txt",
-        EXPORT_DIR / "match_stats.debug.txt",
-        EXPORT_DIR / "match_replay_summary.tsv",
-        EXPORT_DIR / "match_replay_players.tsv",
+        root / "teams.debug.txt",
+        root / "athletes.debug.txt",
+        root / "champion_patch_statistics.debug.txt",
+        root / "champion_patch_statistics.tsv",
+        root / "solo_rank_matches.debug.txt",
+        root / "match_replays.debug.txt",
+        root / "league_competitions.debug.txt",
+        root / "tournament_competitions.debug.txt",
+        root / "year_schedules.debug.txt",
+        root / "match_stats.debug.txt",
+        root / "match_replay_summary.tsv",
+        root / "match_replay_players.tsv",
     ]
 
 
-def inspect_meta_export():
-    manifest_path = EXPORT_DIR / "manifest.tsv"
+def normalized_path_text(path):
+    if not path:
+        return ""
+    try:
+        return str(Path(path).expanduser().resolve()).lower()
+    except (OSError, RuntimeError, ValueError):
+        return str(path).strip().strip('"').lower()
+
+
+def manifest_matches_save_path(manifest, save_path):
+    manifest_save = manifest.get("save")
+    return bool(manifest_save) and bool(save_path) and normalized_path_text(manifest_save) == normalized_path_text(save_path)
+
+
+def inspect_meta_export(export_dir=None):
+    root = export_dir or EXPORT_DIR
+    manifest_path = root / "manifest.tsv"
     manifest = read_tsv_fields(manifest_path)
-    compatibility = read_tsv_fields(EXPORT_DIR / "compatibility_error.tsv")
+    compatibility = read_tsv_fields(root / "compatibility_error.tsv")
     reason = None
+    data_paths = [path for path in meta_export_data_paths(root) if path.exists()]
     if compatibility:
         reason = compatibility.get("message") or compatibility.get("sdk") or "compatibility_error.tsv present"
     elif manifest.get("compatibility") == "incompatible_database_layout":
         reason = "incompatible_database_layout"
     elif manifest and not meta_export_counts_look_sane(manifest):
         reason = "impossible_manifest_counts"
+    elif not manifest and not data_paths:
+        reason = "export_dir_missing" if not root.exists() else "no_export_data"
     else:
-        data_paths = [path for path in meta_export_data_paths() if path.exists()]
         if data_paths and not manifest_path.exists():
             reason = "export_data_without_manifest"
         elif data_paths and manifest_path.exists() and not EXPLICIT_EXPORT_DIR:
@@ -3586,6 +4086,20 @@ def inspect_meta_export():
         "manifest": manifest,
         "compatibility": compatibility,
     }
+
+
+def resolve_meta_export_dir(save_path):
+    primary_status = inspect_meta_export(EXPORT_DIR)
+    if EXPLICIT_EXPORT_DIR or primary_status["usable"]:
+        return EXPORT_DIR, primary_status, None
+
+    snapshot_status = inspect_meta_export(SAVE_PROBE_SNAPSHOT_DIR)
+    if snapshot_status["usable"] and (
+        not save_path or manifest_matches_save_path(snapshot_status.get("manifest") or {}, save_path)
+    ):
+        return SAVE_PROBE_SNAPSHOT_DIR, snapshot_status, primary_status["reason"]
+
+    return EXPORT_DIR, primary_status, None
 
 
 def latest_meta_export_timestamp():
@@ -4088,6 +4602,7 @@ def run_policy_only():
 
 
 def main():
+    global EXPORT_DIR
     args = parse_args()
     if args.policy_only:
         run_policy_only()
@@ -4100,7 +4615,15 @@ def main():
         )
     base = load_js_json(BANPICK_DATA)
     score_model_spec = load_score_model_spec()
-    champions = base["champions"]
+    champions = [dict(champ) for champ in base["champions"]]
+    external_mod_game_root = detect_game_root_for_mods(ROOT)
+    external_champion_mods = load_active_external_champions(champions, external_mod_game_root)
+    if external_champion_mods["championIds"]:
+        print(
+            "External champion mods: "
+            f"{len(external_champion_mods['mods'])} active mods, "
+            f"{len(external_champion_mods['championIds'])} champions"
+        )
     champion_ids = [champ["id"] for champ in champions]
     item_catalog = load_item_catalog()
     print(
@@ -4118,8 +4641,14 @@ def main():
         marker = "exists" if save_dir.exists() else "missing"
         print(f"  - {save_dir} [{marker}]")
     print(f"Selected save: {save_path if save_path else 'not found'}")
+    resolved_export_dir, meta_export_status, export_fallback_reason = resolve_meta_export_dir(save_path)
+    if resolved_export_dir != EXPORT_DIR:
+        EXPORT_DIR = resolved_export_dir
+        print(
+            "Meta export fallback: using save_probe snapshot "
+            f"because primary export was {export_fallback_reason}"
+        )
     print(f"Meta export dir: {EXPORT_DIR if EXPORT_DIR.exists() else str(EXPORT_DIR) + ' [missing]'}")
-    meta_export_status = inspect_meta_export()
     meta_manifest = meta_export_status.get("manifest") or {}
     meta_source_kind = meta_manifest.get("reason") or ("meta_exporter" if meta_export_status["usable"] else "unavailable")
     save_probe_active = meta_export_status["usable"] and meta_source_kind == "save_probe"
@@ -4142,8 +4671,9 @@ def main():
         # attach the wrong current-roster name to old replay snapshots.
         "athletes": exporter_lookup["athletes"],
     }
-    team_lookup_source = "meta_exporter" if exporter_lookup["teams"] else "save_fallback"
-    athlete_lookup_source = "meta_exporter" if exporter_lookup["athletes"] else "unavailable"
+    snapshot_lookup_source = "save_probe" if save_probe_active else "meta_exporter"
+    team_lookup_source = snapshot_lookup_source if exporter_lookup["teams"] else "save_fallback"
+    athlete_lookup_source = snapshot_lookup_source if exporter_lookup["athletes"] else "unavailable"
     print(
         "Lookup: "
         f"teams={len(save_lookup['teams'])} ({team_lookup_source}) "
@@ -4195,12 +4725,23 @@ def main():
 
     current_champion_info = {}
     current_champion_info_count = 0
+    candidate_order = []
+    candidate_index_source = "bundled base candidate order"
     if meta_export_status["usable"]:
-        current_champion_info = load_champion_debug_values(EXPORT_DIR / "champion_info_sheet.debug.txt", champion_ids)
+        champion_info_sheet_path = EXPORT_DIR / "champion_info_sheet.debug.txt"
+        current_champion_info = load_champion_debug_values(champion_info_sheet_path, champion_ids)
         base_champion_info = load_champion_debug_values(EXPORT_DIR / "pre_patch_data.debug.txt", champion_ids)
         current_champion_info_count = apply_current_champion_info(champions, current_champion_info, base_champion_info)
+        candidate_order = parse_champion_candidate_order(champion_info_sheet_path, champion_ids)
+        if candidate_order:
+            candidate_index_source = "save_probe champion_info_sheet order"
         if current_champion_info_count:
             print(f"Champion current info: {current_champion_info_count} champions loaded from save_probe champion_info_sheet")
+    candidate_index_map = assign_candidate_indexes(champions, candidate_order or None)
+    print(
+        "Champion candidate indexes: "
+        f"{len(candidate_index_map)} mapped from {candidate_index_source}"
+    )
 
     current_patch = extract_current_patch_summary(blob, champion_ids, save_path) if blob else {"meta": {"source": None, "versions": [], "changeCount": 0}, "patches": {}, "changes": []}
     print(f"Current patch: versions={len(current_patch['meta']['versions'])} changes={current_patch['meta']['changeCount']}")
@@ -4442,6 +4983,11 @@ def main():
         "sources": {
             "championInfo": "save_probe champion_info_sheet" if current_champion_info_count else "bundled dashboard champion data",
             "championCurrentInfo": current_champion_info_count,
+            "externalChampionGameRoot": str(external_mod_game_root),
+            "externalChampionMods": external_champion_mods["mods"],
+            "externalChampionCount": len(external_champion_mods["championIds"]),
+            "championCandidateIndexSource": candidate_index_source,
+            "championCandidateIndexes": len(candidate_index_map),
             "saveNewsStats": len(news_rows),
             "draftLikeGroups": draft_scan["groups"],
             "metaExporter": bool(exported) and meta_export_status["usable"],

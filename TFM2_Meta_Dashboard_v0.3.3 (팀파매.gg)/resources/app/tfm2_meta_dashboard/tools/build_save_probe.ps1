@@ -12,7 +12,7 @@ $output = Join-Path $scriptDir "tfm2_save_probe.exe"
 function Find-SdkRoot {
     param([string]$StartDir)
 
-    $preferredVersion = "0.4.9"
+    $preferredVersion = "0.4.10"
     $cursor = (Resolve-Path -LiteralPath $StartDir).Path
     while ($cursor) {
         $sdkHome = Join-Path $cursor "2_Mod SDK"

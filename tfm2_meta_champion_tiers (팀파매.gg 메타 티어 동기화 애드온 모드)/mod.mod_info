@@ -3,11 +3,11 @@
   "dependencies": [
     {
       "mod_id": "base",
-      "version": ">=0.4.9"
+      "version": ">=0.4.10"
     }
   ],
   "description": "Applies TeamParmae.gg latest-patch worldwide tournament champion tiers to in-game team champion tier data.",
-  "last_updated": "2026-06-04",
+  "last_updated": "2026-06-05",
   "mod_id": "tfm2_meta_champion_tiers",
   "name": "TFM2 Meta Champion Tiers",
   "tags": [
@@ -16,5 +16,5 @@
     "Tier",
     "TeamParmae"
   ],
-  "version": "0.1.4"
+  "version": "0.2.0"
 }

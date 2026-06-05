@@ -29,7 +29,8 @@ RELEASE_API = f"https://api.github.com/repos/{REPO_FULL_NAME}/releases/latest"
 RELEASE_ASSET_NAME = "TFM2.gg_Distribution.zip"
 RELEASE_PAGE_URL = f"https://github.com/{REPO_FULL_NAME}/releases/tag/latest"
 DIRECT_DOWNLOAD_URL = f"https://github.com/{REPO_FULL_NAME}/releases/download/latest/{RELEASE_ASSET_NAME}"
-TARGET_GAME_VERSION = "0.4.9"
+TARGET_GAME_VERSION = "0.4.10"
+STEAM_APP_ID = "3009300"
 PACKAGE_LAYOUT_VERSION = 3
 DASHBOARD_INSTALL_DIR_NAME = APP_NAME
 DASHBOARD_EXE_NAME = "TFM2MetaDashboard.exe"
@@ -85,6 +86,21 @@ class AddonPackage:
     dll_name: str
     policy_file: str | None = None
     config_extra: tuple[tuple[str, str], ...] = ()
+
+
+@dataclass(frozen=True)
+class WorkshopChampionMod:
+    workshop_id: str
+    mod_id: str
+    name: str
+    version: str
+    author: str
+    path: Path
+    champion_ids: tuple[str, ...]
+    enabled: bool
+    known: bool
+    has_style_override: bool
+    has_code: bool
 
 
 ADDON_PACKAGES = (
@@ -494,6 +510,160 @@ class InstallerModel:
                     library = Path(parts[3].replace("\\\\", "\\"))
                     candidates.append(library / "steamapps" / "common" / "Teamfight Manager2")
         return candidates
+
+    def steamapps_dirs(self, game_dir: Path) -> list[Path]:
+        candidates = []
+        try:
+            candidates.append(game_dir.resolve().parents[1])
+        except IndexError:
+            pass
+        for guessed in self.steam_library_guesses() + [DEFAULT_GAME_DIR]:
+            try:
+                candidates.append(guessed.resolve().parents[1])
+            except (IndexError, OSError):
+                continue
+        seen = set()
+        result = []
+        for path in candidates:
+            key = str(path).lower()
+            if key not in seen and (path / "common").exists():
+                seen.add(key)
+                result.append(path)
+        return result
+
+    def workshop_content_dirs(self, game_dir: Path) -> list[Path]:
+        dirs = []
+        for steamapps in self.steamapps_dirs(game_dir):
+            candidate = steamapps / "workshop" / "content" / STEAM_APP_ID
+            if candidate.exists():
+                dirs.append(candidate)
+        return dirs
+
+    def mods_config_path(self, game_dir: Path) -> Path:
+        return game_dir / "config" / "game" / "mods.json"
+
+    def read_mods_config(self, game_dir: Path) -> dict:
+        data = read_json(self.mods_config_path(game_dir), {})
+        if not isinstance(data, dict):
+            data = {}
+        for key in ["enabled_mods", "known_workshop_mods", "accepted_code_mod_warnings", "accepted_save_mod_mismatch_warnings"]:
+            if not isinstance(data.get(key), list):
+                data[key] = []
+        return data
+
+    def write_mods_config(self, game_dir: Path, data: dict) -> None:
+        path = self.mods_config_path(game_dir)
+        self.backup_existing(game_dir, [path])
+        write_json(path, data)
+
+    def is_game_running(self) -> bool:
+        try:
+            result = subprocess.run(
+                ["tasklist", "/FI", "IMAGENAME eq TeamfightManager2.exe"],
+                capture_output=True,
+                text=True,
+                timeout=5,
+            )
+        except Exception:
+            return False
+        return "TeamfightManager2.exe" in (result.stdout or "")
+
+    def find_workshop_mod_info(self, workshop_item_dir: Path) -> tuple[Path, Path] | None:
+        direct = workshop_item_dir / "mod.mod_info"
+        if direct.exists():
+            return workshop_item_dir, direct
+        try:
+            children = sorted(path for path in workshop_item_dir.iterdir() if path.is_dir())
+        except OSError:
+            return None
+        for child in children:
+            info = child / "mod.mod_info"
+            if info.exists():
+                return child, info
+        return None
+
+    def load_champion_ids_from_mod(self, mod_root: Path) -> tuple[str, ...]:
+        champion_dir = mod_root / "champion"
+        if not champion_dir.exists():
+            return ()
+        ids = []
+        for file_path in sorted(champion_dir.glob("*.data_champion")):
+            data = read_json(file_path, {})
+            champion_id = data.get("id") if isinstance(data, dict) else None
+            ids.append(str(champion_id or file_path.stem))
+        return tuple(ids)
+
+    def mod_has_style_override(self, mod_root: Path) -> bool:
+        override_info = read_json(mod_root / "mod.override_info", {})
+        if not isinstance(override_info, dict):
+            return False
+        row = override_info.get("asset/base/style/champion_view")
+        return isinstance(row, dict) and str(row.get("type") or "").lower() == "override"
+
+    def discover_workshop_champion_mods(self, game_dir: Path) -> list[WorkshopChampionMod]:
+        config = self.read_mods_config(game_dir)
+        enabled = set(map(str, config.get("enabled_mods", [])))
+        known = set(map(str, config.get("known_workshop_mods", [])))
+        mods = []
+        seen = set()
+        for content_dir in self.workshop_content_dirs(game_dir):
+            try:
+                item_dirs = sorted(path for path in content_dir.iterdir() if path.is_dir())
+            except OSError:
+                continue
+            for item_dir in item_dirs:
+                located = self.find_workshop_mod_info(item_dir)
+                if not located:
+                    continue
+                mod_root, info_path = located
+                info = read_json(info_path, {})
+                if not isinstance(info, dict):
+                    continue
+                mod_id = str(info.get("mod_id") or info.get("id") or "").strip()
+                if not mod_id or mod_id in seen:
+                    continue
+                champion_ids = self.load_champion_ids_from_mod(mod_root)
+                if not champion_ids:
+                    continue
+                seen.add(mod_id)
+                mods.append(
+                    WorkshopChampionMod(
+                        workshop_id=item_dir.name,
+                        mod_id=mod_id,
+                        name=str(info.get("name") or mod_id),
+                        version=str(info.get("version") or "-"),
+                        author=str(info.get("author") or "-"),
+                        path=mod_root,
+                        champion_ids=champion_ids,
+                        enabled=mod_id in enabled,
+                        known=mod_id in known,
+                        has_style_override=self.mod_has_style_override(mod_root),
+                        has_code=bool(list(mod_root.rglob("*.dll"))),
+                    )
+                )
+        return mods
+
+    def set_workshop_champion_mod_enabled(self, game_dir: Path, mod_id: str, enabled: bool) -> None:
+        if self.is_game_running():
+            raise RuntimeError("게임이 실행 중입니다. 챔피언 모드 활성 상태는 게임을 종료한 뒤 변경해 주세요.")
+        mods = {row.mod_id: row for row in self.discover_workshop_champion_mods(game_dir)}
+        if mod_id not in mods:
+            raise RuntimeError(f"감지된 챔피언 모드가 아닙니다: {mod_id}")
+        config = self.read_mods_config(game_dir)
+        enabled_mods = [str(item) for item in config.get("enabled_mods", [])]
+        known_mods = [str(item) for item in config.get("known_workshop_mods", [])]
+        if enabled:
+            if mod_id not in enabled_mods:
+                enabled_mods.append(mod_id)
+            if mod_id not in known_mods:
+                known_mods.append(mod_id)
+        else:
+            enabled_mods = [item for item in enabled_mods if item != mod_id]
+            if mod_id not in known_mods:
+                known_mods.append(mod_id)
+        config["enabled_mods"] = enabled_mods
+        config["known_workshop_mods"] = known_mods
+        self.write_mods_config(game_dir, config)
 
     def detect_game_dir(self) -> Path:
         for path in self.guessed_game_dirs():
@@ -1159,8 +1329,8 @@ class Tfm2InstallerApp(tk.Tk):
     def __init__(self):
         super().__init__()
         self.title("TFM2.gg 설치 도구")
-        self.geometry("920x660")
-        self.minsize(860, 620)
+        self.geometry("1020x760")
+        self.minsize(960, 700)
         self.configure(bg="#f5f7fb")
 
         self.model = InstallerModel(package_root())
@@ -1257,7 +1427,7 @@ class Tfm2InstallerApp(tk.Tk):
         outer = ttk.Frame(self, padding=22)
         outer.pack(fill="both", expand=True)
         outer.columnconfigure(0, weight=1)
-        outer.rowconfigure(4, weight=1)
+        outer.rowconfigure(4, weight=1, minsize=170)
 
         header = ttk.Frame(outer)
         header.grid(row=0, column=0, sticky="ew")
@@ -1293,16 +1463,17 @@ class Tfm2InstallerApp(tk.Tk):
 
         actions = ttk.Frame(outer, style="Card.TFrame", padding=16)
         actions.grid(row=3, column=0, sticky="ew", pady=(0, 12))
-        for index in range(8):
+        for index in range(9):
             actions.columnconfigure(index, weight=1)
         ttk.Button(actions, text="설치", style="Primary.TButton", command=lambda: self.run_task("install")).grid(row=0, column=0, sticky="ew", padx=4)
         ttk.Button(actions, text="복구", command=lambda: self.run_task("repair")).grid(row=0, column=1, sticky="ew", padx=4)
         ttk.Button(actions, text="아이템", style="Accent.TButton", command=lambda: self.run_task("addon")).grid(row=0, column=2, sticky="ew", padx=4)
         ttk.Button(actions, text="메타 티어", style="Accent.TButton", command=lambda: self.run_task("meta_tier_addon")).grid(row=0, column=3, sticky="ew", padx=4)
         ttk.Button(actions, text="AI 밴픽", style="Accent.TButton", command=lambda: self.run_task("ai_banpick_addon")).grid(row=0, column=4, sticky="ew", padx=4)
-        ttk.Button(actions, text="제거", style="Danger.TButton", command=self.confirm_remove).grid(row=0, column=5, sticky="ew", padx=4)
-        ttk.Button(actions, text="README", command=self.show_readme).grid(row=0, column=6, sticky="ew", padx=4)
-        ttk.Button(actions, text="원격 업데이트", style="Refresh.TButton", command=lambda: self.run_task("update")).grid(row=0, column=7, sticky="ew", padx=4)
+        ttk.Button(actions, text="챔프 모드", style="Refresh.TButton", command=self.show_champion_mod_manager).grid(row=0, column=5, sticky="ew", padx=4)
+        ttk.Button(actions, text="제거", style="Danger.TButton", command=self.confirm_remove).grid(row=0, column=6, sticky="ew", padx=4)
+        ttk.Button(actions, text="README", command=self.show_readme).grid(row=0, column=7, sticky="ew", padx=4)
+        ttk.Button(actions, text="원격 업데이트", style="Refresh.TButton", command=lambda: self.run_task("update")).grid(row=0, column=8, sticky="ew", padx=4)
 
         body = ttk.Frame(outer)
         body.grid(row=4, column=0, sticky="nsew")
@@ -1315,7 +1486,7 @@ class Tfm2InstallerApp(tk.Tk):
         ttk.Label(log_card, text="작업 로그", style="CardTitle.TLabel").grid(row=0, column=0, sticky="w", pady=(0, 8))
         self.log_text = tk.Text(
             log_card,
-            height=12,
+            height=9,
             bg="#0f172a",
             fg="#dbeafe",
             insertbackground="#dbeafe",
@@ -1326,6 +1497,9 @@ class Tfm2InstallerApp(tk.Tk):
             wrap="word",
         )
         self.log_text.grid(row=1, column=0, sticky="nsew")
+        log_scroll = ttk.Scrollbar(log_card, orient="vertical", command=self.log_text.yview)
+        self.log_text.configure(yscrollcommand=log_scroll.set)
+        log_scroll.grid(row=1, column=1, sticky="ns")
 
         footer = ttk.Frame(outer)
         footer.grid(row=5, column=0, sticky="ew", pady=(12, 0))
@@ -1364,21 +1538,29 @@ class Tfm2InstallerApp(tk.Tk):
         self.compat_pill.configure(style="StatusGood.TLabel" if main.ok else ("StatusWarn.TLabel" if main.label == "주의" else "StatusBad.TLabel"))
 
         installed = self.model.installed_status(game_dir)
+        addon_short_labels = {
+            MOD_ID: "아이템",
+            META_TIER_MOD_ID: "메타",
+            AI_BANPICK_MOD_ID: "AI",
+        }
         addon_lines = []
         for addon in ADDON_PACKAGES:
             row = installed["addons"][addon.mod_id]
-            addon_lines.append(f"{addon.label}: {'설치됨' if row['installed'] else '없음'} {row['version'] if row['installed'] else ''}".rstrip())
+            label = addon_short_labels.get(addon.mod_id, addon.label)
+            state = row["version"] if row["installed"] and row["version"] else ("설치됨" if row["installed"] else "없음")
+            addon_lines.append(f"{label} {state}")
         policy_ok = installed["policyFiles"].get("championTier") and installed["policyFiles"].get("aiChampion")
         meta_logs = installed["addonLogs"]["metaTier"]
         ai_logs = installed["addonLogs"]["aiBanpick"]
+        shell_state = "설치됨" if installed["dashboardShellInstalled"] else "없음"
+        dashboard_state = "설치됨" if installed["dashboardInstalled"] else "없음"
         install_lines = [
-            f"실행 파일: {'설치됨' if installed['dashboardShellInstalled'] else '없음'}",
-            f"대시보드: {'설치됨' if installed['dashboardInstalled'] else '없음'}",
+            f"실행/대시보드: {shell_state} / {dashboard_state}",
             f"설치 구조: {installed['layoutStatus']}",
-            *addon_lines,
-            f"정책 TSV: {'있음' if policy_ok else '없음'}",
+            f"애드온: {' / '.join(addon_lines)}",
             f"메타 티어 TSV: {installed['policyDetails']['championTier']}",
             f"AI 보정 TSV: {installed['policyDetails']['aiChampion']}",
+            f"정책 TSV: {'있음' if policy_ok else '없음'}",
             f"모드 로그: 티어 {'있음' if meta_logs['latest'] or meta_logs['debug'] else '대기'} / AI {'있음' if ai_logs['debug'] else '대기'}",
             f"메타 생성: {installed['coreGeneratedAt']}",
         ]
@@ -1508,6 +1690,121 @@ class Tfm2InstallerApp(tk.Tk):
             self.work_queue.put(("refresh", None))
         except Exception as exc:
             self.work_queue.put(("error", str(exc)))
+
+    def show_champion_mod_manager(self):
+        win = tk.Toplevel(self)
+        win.title("챔피언 추가 모드 관리")
+        win.geometry("900x520")
+        win.configure(bg="#f5f7fb")
+        frame = ttk.Frame(win, padding=16)
+        frame.pack(fill="both", expand=True)
+        frame.rowconfigure(2, weight=1)
+        frame.columnconfigure(0, weight=1)
+
+        title = ttk.Frame(frame)
+        title.grid(row=0, column=0, sticky="ew", pady=(0, 10))
+        title.columnconfigure(0, weight=1)
+        ttk.Label(title, text="챔피언 추가 모드", style="Title.TLabel").grid(row=0, column=0, sticky="w")
+        ttk.Label(
+            title,
+            text="Steam 창작마당에서 감지된 챔피언 추가 모드를 게임 활성 목록에 켜고 끕니다. 적용 후 게임 재시작이 필요합니다.",
+            style="Subtle.TLabel",
+        ).grid(row=1, column=0, sticky="w", pady=(3, 0))
+
+        info_var = tk.StringVar(value="")
+        ttk.Label(frame, textvariable=info_var, style="Subtle.TLabel").grid(row=1, column=0, sticky="w", pady=(0, 8))
+
+        columns = ("state", "name", "mod_id", "version", "champions", "workshop", "warnings")
+        tree = ttk.Treeview(frame, columns=columns, show="headings", selectmode="browse")
+        headers = {
+            "state": "상태",
+            "name": "모드",
+            "mod_id": "mod_id",
+            "version": "버전",
+            "champions": "챔피언",
+            "workshop": "Workshop",
+            "warnings": "주의",
+        }
+        widths = {
+            "state": 78,
+            "name": 230,
+            "mod_id": 130,
+            "version": 70,
+            "champions": 90,
+            "workshop": 110,
+            "warnings": 150,
+        }
+        for column in columns:
+            tree.heading(column, text=headers[column])
+            tree.column(column, width=widths[column], anchor="w")
+        tree.grid(row=2, column=0, sticky="nsew")
+        scroll = ttk.Scrollbar(frame, orient="vertical", command=tree.yview)
+        scroll.grid(row=2, column=1, sticky="ns")
+        tree.configure(yscrollcommand=scroll.set)
+
+        rows_by_iid: dict[str, WorkshopChampionMod] = {}
+
+        def refresh_tree():
+            rows_by_iid.clear()
+            tree.delete(*tree.get_children())
+            mods = self.model.discover_workshop_champion_mods(self.current_game_dir())
+            active_count = sum(1 for row in mods if row.enabled)
+            info_var.set(f"감지된 챔피언 모드 {len(mods)}개 · 활성 {active_count}개")
+            for index, row in enumerate(mods):
+                warnings = []
+                if row.has_style_override:
+                    warnings.append("표시 스타일 override")
+                if row.has_code:
+                    warnings.append("DLL 포함")
+                values = (
+                    "켜짐" if row.enabled else "꺼짐",
+                    row.name,
+                    row.mod_id,
+                    row.version,
+                    f"{len(row.champion_ids)}개",
+                    row.workshop_id,
+                    ", ".join(warnings) if warnings else "-",
+                )
+                iid = str(index)
+                rows_by_iid[iid] = row
+                tree.insert("", "end", iid=iid, values=values)
+
+        def selected_row() -> WorkshopChampionMod | None:
+            selection = tree.selection()
+            if not selection:
+                messagebox.showinfo("챔피언 모드", "먼저 모드를 선택해 주세요.")
+                return None
+            return rows_by_iid.get(selection[0])
+
+        def set_enabled(enabled: bool):
+            row = selected_row()
+            if not row:
+                return
+            action = "활성화" if enabled else "비활성화"
+            if not messagebox.askyesno("챔피언 모드", f"{row.name}\n\n이 모드를 {action}할까요?\n게임 실행 중에는 적용되지 않습니다."):
+                return
+            try:
+                self.model.set_workshop_champion_mod_enabled(self.current_game_dir(), row.mod_id, enabled)
+                self.log(f"챔피언 모드 {action}: {row.mod_id}")
+                refresh_tree()
+                self.refresh_status()
+                messagebox.showinfo("챔피언 모드", f"{row.name} {action} 완료\n게임을 재시작해야 적용됩니다.")
+            except Exception as exc:
+                messagebox.showerror("챔피언 모드", str(exc))
+
+        def open_folder():
+            row = selected_row()
+            if row:
+                os.startfile(row.path)
+
+        btns = ttk.Frame(frame)
+        btns.grid(row=3, column=0, columnspan=2, sticky="ew", pady=(12, 0))
+        ttk.Button(btns, text="활성화", style="Primary.TButton", command=lambda: set_enabled(True)).pack(side="left")
+        ttk.Button(btns, text="비활성화", style="Danger.TButton", command=lambda: set_enabled(False)).pack(side="left", padx=(8, 0))
+        ttk.Button(btns, text="폴더 열기", command=open_folder).pack(side="left", padx=(8, 0))
+        ttk.Button(btns, text="새로고침", style="Refresh.TButton", command=refresh_tree).pack(side="left", padx=(8, 0))
+        ttk.Button(btns, text="닫기", command=win.destroy).pack(side="right")
+        refresh_tree()
 
     def confirm_remove(self):
         if messagebox.askyesno("제거 확인", "TFM2.gg 대시보드와 설치된 팀파매.gg 애드온을 제거할까요?\n기존 항목은 백업 후 제거됩니다."):

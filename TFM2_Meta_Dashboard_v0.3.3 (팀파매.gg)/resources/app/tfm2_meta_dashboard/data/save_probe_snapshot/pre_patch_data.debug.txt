@@ -4194,6 +4194,7 @@
                     start_timing: 18,
                     cancelable: false,
                     attack_speed_ap_ratio: 20,
+                    current_hp_reduce_ratio: 50,
                 },
                 tags: [
                     AD,
