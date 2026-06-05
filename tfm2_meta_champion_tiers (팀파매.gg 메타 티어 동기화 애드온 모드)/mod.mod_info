@@ -6,7 +6,7 @@
       "version": ">=0.4.9"
     }
   ],
-  "description": "Applies TeamParmae.gg overall-derived champion tiers to in-game team champion tier data.",
+  "description": "Applies TeamParmae.gg latest-patch worldwide tournament champion tiers to in-game team champion tier data.",
   "last_updated": "2026-06-04",
   "mod_id": "tfm2_meta_champion_tiers",
   "name": "TFM2 Meta Champion Tiers",

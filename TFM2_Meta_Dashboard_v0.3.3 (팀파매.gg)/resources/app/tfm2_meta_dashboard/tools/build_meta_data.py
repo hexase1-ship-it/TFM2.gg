@@ -56,8 +56,8 @@ POLICY_PRESETS = {
     "fearless": {"label": "fearless", "weights": {"win": 1.0, "pick": 0.18, "ban": 0.55}},
     "hardFearless": {"label": "hardFearless", "weights": {"win": 1.0, "pick": 0.15, "ban": 0.85}},
 }
-POLICY_TIER_MAP = {"OP": "S", "1": "A", "2": "B", "3": "C", "4": "D", "-": "C"}
-POLICY_TIER_SORT = {"S": 5, "A": 4, "B": 3, "C": 2, "D": 1}
+POLICY_TIER_MAP = {"OP": "S", "1": "A", "2": "B", "3": "C", "4": "D", "-": "No"}
+POLICY_TIER_SORT = {"S": 6, "A": 5, "B": 4, "C": 3, "D": 2, "No": 1}
 TIER_POLICY_OVERALL_ANCHORS = {"S": 90.0, "A": 75.0, "B": 62.0, "C": 50.0, "D": 35.0}
 AI_POLICY_OVERALL_ANCHORS = {"S": 80.0, "A": 70.0, "B": 60.0, "C": 50.0, "D": 40.0}
 INTERNAL_SCORE_FIELDS = [
@@ -716,7 +716,7 @@ def score_model_entry(stat, sample_info, preset_id, score_model_spec, context):
             "metaLower": None,
             "strengthScore": None,
             "draftPressureScore": None,
-            "policyTier": "C",
+            "policyTier": "No",
             "policyOverall": 50.0,
             "sample": sample,
             "minSample": min_sample,
@@ -797,7 +797,7 @@ def meta_tier_for_policy_rank(entry, index, total, score_model_spec=None):
 
 def tier_policy_overall(policy_tier, eligible=True):
     if not eligible:
-        return 50.0
+        return None
     return TIER_POLICY_OVERALL_ANCHORS.get(policy_tier, 50.0)
 
 
@@ -811,20 +811,20 @@ def ai_policy_overall(entry):
     return round1(clamp_value(base + score_delta + lower_delta, 20.0, 80.0))
 
 
-def select_policy_stats(combined_stats, stats_by_patch, patch_versions):
+def select_policy_stats(default_stats, stats_by_patch, patch_versions, scope="overall"):
     requested = os.environ.get("TFM2_POLICY_PATCH", "latest").strip()
     if requested in {"", "latest"}:
         patch = patch_versions[-1] if patch_versions else "all"
     else:
         patch = requested
     if patch != "all":
-        rows = (stats_by_patch.get(patch, {}) or {}).get("overall")
+        rows = (stats_by_patch.get(patch, {}) or {}).get(scope)
         if rows:
-            return rows, patch, f"overall patch {patch}"
-    return combined_stats, "all", "overall all patches"
+            return rows, patch, f"{scope} patch {patch}"
+    return default_stats, "all", f"{scope} all patches"
 
 
-def build_policy_exports(champions, stats, generated_at, save_path, patch_key, source_label, replay_date_status, score_model_spec):
+def build_policy_exports(champions, stats, generated_at, save_path, patch_key, source_label, replay_date_status, score_model_spec, scope="overall"):
     legacy_preset = policy_preset()
     preset_id = legacy_preset["label"]
     preset = model_preset(score_model_spec, preset_id)
@@ -872,7 +872,8 @@ def build_policy_exports(champions, stats, generated_at, save_path, patch_key, s
                 "championId": entry["championId"],
                 "championName": entry["championName"],
                 "tier": policy_tier,
-                "tierOverall": round1(tier_overall),
+                "aiTier": policy_tier if entry["eligible"] else "C",
+                "tierOverall": round1(tier_overall) if tier_overall is not None else None,
                 "aiOverall": round1(ai_overall),
                 "rawOverall": round1(entry["policyOverall"] if entry["eligible"] else 50.0),
                 "eligible": entry["eligible"],
@@ -903,7 +904,8 @@ def build_policy_exports(champions, stats, generated_at, save_path, patch_key, s
         "save": str(save_path) if save_path else None,
         "source": source_label,
         "patch": patch_key,
-        "scope": "overall",
+        "scope": scope,
+        "region": "all",
         "role": "all",
         "modelVersion": score_model_spec.get("modelVersion"),
         "preset": preset.get("label") or preset_id,
@@ -923,12 +925,14 @@ def build_policy_exports(champions, stats, generated_at, save_path, patch_key, s
         "rowCount": len(rows),
         "policyProfiles": {
             "championTier": {
+                "tierField": "tier",
                 "overallField": "tierOverall",
-                "semantic": "tier_anchor_for_in_game_sabcd",
+                "semantic": "dashboard_meta_tier_for_in_game_sabcd_no",
                 "anchors": TIER_POLICY_OVERALL_ANCHORS,
-                "note": "overall is an S/A/B/C/D anchor for the native tier addon, not the raw dashboard meta score.",
+                "note": "overall is an S/A/B/C/D anchor for the native tier addon; No leaves overall blank so the native addon uses the tier column.",
             },
             "aiChampion": {
+                "tierField": "aiTier",
                 "overallField": "aiOverall",
                 "semantic": "ai_bias_scaled_from_meta_tier",
                 "anchors": AI_POLICY_OVERALL_ANCHORS,
@@ -943,8 +947,14 @@ def build_policy_exports(champions, stats, generated_at, save_path, patch_key, s
 def render_policy_tsv(policy, profile_key):
     meta = policy["metadata"]
     profile = (meta.get("policyProfiles") or {}).get(profile_key) or {}
+    tier_field = profile.get("tierField") or "tier"
     overall_field = profile.get("overallField") or "tierOverall"
     native_bias_formula = profile.get("nativeBiasFormula") or "-"
+    low_sample_note = (
+        "# Non-eligible or low-sample champions are emitted as No with blank overall."
+        if profile_key == "championTier"
+        else "# Non-eligible or low-sample champions are emitted as neutral C/50.0."
+    )
     lines = [
         "# AUTO_GENERATED_BY_TFM2_META_DASHBOARD",
         "# Do not hand-edit unless you intentionally want to override dashboard meta scoring.",
@@ -952,6 +962,9 @@ def render_policy_tsv(policy, profile_key):
         f"# Save: {meta.get('save') or ''}",
         f"# Source: {meta.get('source')}",
         f"# Patch: {meta.get('patch')}",
+        f"# Scope: {meta.get('scope')}",
+        f"# Region: {meta.get('region')}",
+        f"# Role: {meta.get('role')}",
         f"# Model: {meta.get('modelVersion')}",
         f"# Preset: {meta.get('preset')} weights={json.dumps(meta.get('weights'), sort_keys=True)}",
         f"# Sample: {meta.get('sample', {}).get('mode')} min={meta.get('sample', {}).get('minSample')} reason={meta.get('sample', {}).get('reason')}",
@@ -963,12 +976,21 @@ def render_policy_tsv(policy, profile_key):
         f"# OverallAnchors: {json.dumps(profile.get('anchors') or {}, sort_keys=True, ensure_ascii=False)}",
         f"# NativeBiasFormula: {native_bias_formula}",
         "# Format: champion_id<TAB>tier<TAB>overall",
-        "# Non-eligible or low-sample champions are emitted as neutral C/50.0.",
+        "# For No tier, overall is omitted so the native addon falls back to the tier column.",
+        low_sample_note,
         "# champion_id\ttier\toverall",
     ]
     for row in policy["rows"]:
-        overall = round1(row.get(overall_field, 50.0))
-        lines.append(f"{row['championId']}\t{row['tier']}\t{overall:.1f}")
+        tier = row.get(tier_field) or row.get("tier") or "C"
+        overall_value = row.get(overall_field)
+        try:
+            overall = float(overall_value)
+        except (TypeError, ValueError):
+            overall = None
+        if overall is None or not math.isfinite(overall):
+            lines.append(f"{row['championId']}\t{tier}")
+        else:
+            lines.append(f"{row['championId']}\t{tier}\t{round1(overall):.1f}")
     return "\n".join(lines) + "\n"
 
 
@@ -998,9 +1020,10 @@ def write_text_atomic(path: Path, text: str, encoding="utf-8"):
     tmp.replace(path)
 
 
-def write_policy_exports(policy):
-    tier_text = render_policy_tsv(policy, "championTier")
-    ai_text = render_policy_tsv(policy, "aiChampion")
+def write_policy_exports(champion_tier_policy, ai_champion_policy=None):
+    ai_champion_policy = ai_champion_policy or champion_tier_policy
+    tier_text = render_policy_tsv(champion_tier_policy, "championTier")
+    ai_text = render_policy_tsv(ai_champion_policy, "aiChampion")
     tier_written, tier_skipped = write_policy_file(
         tier_text,
         [CHAMPION_TIER_POLICY_OUT],
@@ -3803,15 +3826,18 @@ def strip_internal_score_fields_from_split(split_payload, keep_source_counters=F
 
 
 def strip_internal_score_fields_for_payload(combined_stats, tournament_stats, solo_stats, split_payloads=None, stats_by_patch=None):
+    # Source counters are part of the public scoring input now. Keep them in the
+    # browser payload so the dashboard and generated native addon policies use
+    # the same source-normalized exposure calculation.
     strip_internal_score_fields_from_stats(combined_stats, keep_source_counters=True)
-    strip_internal_score_fields_from_stats(tournament_stats)
-    strip_internal_score_fields_from_stats(solo_stats)
+    strip_internal_score_fields_from_stats(tournament_stats, keep_source_counters=True)
+    strip_internal_score_fields_from_stats(solo_stats, keep_source_counters=True)
     for scope_group in (stats_by_patch or {}).values():
         if isinstance(scope_group, dict):
-            for scope, stats in scope_group.items():
-                strip_internal_score_fields_from_stats(stats, keep_source_counters=(scope == "overall"))
-    for split_payload, keep_source_counters in split_payloads or []:
-        strip_internal_score_fields_from_split(split_payload, keep_source_counters=keep_source_counters)
+            for stats in scope_group.values():
+                strip_internal_score_fields_from_stats(stats, keep_source_counters=True)
+    for split_payload, _keep_source_counters in split_payloads or []:
+        strip_internal_score_fields_from_split(split_payload, keep_source_counters=True)
 
 
 def split_count(split_payload, axis, key):
@@ -4223,18 +4249,41 @@ def main():
 
     generated_at = datetime.now().isoformat(timespec="seconds")
     core_item_builds = build_core_item_builds(full_match_analysis, generated_at, save_path, patch_versions, item_catalog)
-    policy_stats, policy_patch, policy_source = select_policy_stats(combined_stats, stats_by_patch, patch_versions)
-    policy_exports = build_policy_exports(
+    tier_policy_stats, tier_policy_patch, tier_policy_source = select_policy_stats(
+        tournament_stats,
+        stats_by_patch,
+        patch_versions,
+        scope="tournament",
+    )
+    ai_policy_stats, ai_policy_patch, ai_policy_source = select_policy_stats(
+        combined_stats,
+        stats_by_patch,
+        patch_versions,
+        scope="overall",
+    )
+    champion_tier_policy_exports = build_policy_exports(
         champions,
-        policy_stats,
+        tier_policy_stats,
         generated_at,
         save_path,
-        policy_patch,
-        policy_source,
+        tier_policy_patch,
+        tier_policy_source,
         replay_date_status,
         score_model_spec,
+        scope="tournament",
     )
-    policy_export_status = write_policy_exports(policy_exports)
+    ai_champion_policy_exports = build_policy_exports(
+        champions,
+        ai_policy_stats,
+        generated_at,
+        save_path,
+        ai_policy_patch,
+        ai_policy_source,
+        replay_date_status,
+        score_model_spec,
+        scope="overall",
+    )
+    policy_export_status = write_policy_exports(champion_tier_policy_exports, ai_champion_policy_exports)
     strip_internal_score_fields_for_payload(
         combined_stats,
         tournament_stats,
@@ -4316,7 +4365,10 @@ def main():
             "coreItemBuildsMod": str(CORE_ITEM_BUILDS_MOD_OUT),
             "coreItemBuildsTournamentMatches": core_item_builds["sources"]["tournamentMatches"],
             "policyExports": policy_export_status,
-            "policyExportSource": policy_exports["metadata"],
+            "policyExportSource": {
+                "championTier": champion_tier_policy_exports["metadata"],
+                "aiChampion": ai_champion_policy_exports["metadata"],
+            },
             "leagueSplitMatches": tournament_splits["counts"].get("league", {}),
             "soloRegionMatches": solo_splits["counts"].get("region", {}),
         },
