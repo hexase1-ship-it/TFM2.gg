@@ -14,6 +14,7 @@ const POLICY_FILE_NAME: &str = "champion_tier_policy.tsv";
 
 static POLICY_CACHE: OnceLock<Mutex<PolicyCache>> = OnceLock::new();
 static LAST_APPLY: OnceLock<Mutex<Option<String>>> = OnceLock::new();
+static LAST_POLICY_APPLY: OnceLock<Mutex<Option<String>>> = OnceLock::new();
 static LAST_ERROR: OnceLock<Mutex<Option<String>>> = OnceLock::new();
 
 #[derive(Clone)]
@@ -59,6 +60,18 @@ fn apply_policy_to_scene(scene: &mut Scene, source_label: &str) {
     let Ok(mut db) = data.db.try_borrow_mut() else {
         return;
     };
+    let db_addr = (&*db as *const _) as usize;
+    let apply_key = format!(
+        "{}:{:?}:{:?}:{}:{}:{db_addr:x}",
+        policy.source.display(),
+        policy.modified,
+        policy.size,
+        policy.rows.len(),
+        db.teams.len(),
+    );
+    if should_skip_policy_apply(&apply_key) {
+        return;
+    }
 
     let mut teams = 0usize;
     let mut changed = 0usize;
@@ -85,6 +98,7 @@ fn apply_policy_to_scene(scene: &mut Scene, source_label: &str) {
             }
         }
     }
+    remember_policy_apply(apply_key);
 
     let signature = format!(
         "{source_label}:{:?}:{:?}:{changed}:{already_matched}",
@@ -337,6 +351,21 @@ fn remember_apply_signature(signature: String) -> bool {
         true
     } else {
         false
+    }
+}
+
+fn should_skip_policy_apply(key: &str) -> bool {
+    let slot = LAST_POLICY_APPLY.get_or_init(|| Mutex::new(None));
+    if let Ok(guard) = slot.lock() {
+        return guard.as_deref() == Some(key);
+    }
+    false
+}
+
+fn remember_policy_apply(key: String) {
+    let slot = LAST_POLICY_APPLY.get_or_init(|| Mutex::new(None));
+    if let Ok(mut guard) = slot.lock() {
+        *guard = Some(key);
     }
 }
 
