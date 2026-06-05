@@ -1,0 +1,1389 @@
+TFM2.gg Meta Score Formula Deep-Dive
+예전 메타 판단 산식과 현재 tfm2gg-meta-v1 산식 비교 전문 보고서
+
+작성 목적
+=========
+
+이 문서는 TFM2.gg 대시보드에서 사용하던 예전 메타 판단 방식과, 현재 적용된
+tfm2gg-meta-v1 메타 스코어/메타 티어 산식을 기술적으로 비교하기 위해 작성했다.
+
+핵심 결론은 다음과 같다.
+
+예전 방식은 독립적인 "메타 스코어" 모델이라기보다, 일정 표본 이상인 챔피언을
+원시 승률 기준으로 티어화하는 단순 승률 컷 모델이었다. 반면 현재 방식은
+Bayesian 승률 보정, 표본 기준 자동화, 픽률/밴률 기반 드래프트 압력,
+진행 방식별 가중치, 보수 점수 기반 백분위 티어 컷을 결합한 복합 메타 모델이다.
+
+즉 예전 방식이 "승률표"에 가까웠다면, 현재 방식은 "메타 위협도 추정 모델"에
+가깝다.
+
+
+1. 용어 정리
+============
+
+1.1. 예전 방식
+--------------
+
+이 문서에서 "예전 방식"은 아래 로직을 의미한다.
+
+- pickCount가 최소 표본 이상인지 확인한다.
+- winRate가 없으면 티어를 계산하지 않는다.
+- 표본이 충분하면 원시 winRate 하나로 OP/1/2/3/4티어를 나눈다.
+
+코드상으로는 build_meta_data.py의 legacy calculated_tier 계열 로직에 해당한다.
+
+중요한 점:
+
+예전 방식에는 현재 의미의 독립적인 metaScore, metaLower, strengthScore,
+draftPressureScore가 없었다. 실질적으로 "원시 승률 + 고정 티어 컷"이 메타 판단
+역할을 했다.
+
+
+1.2. 현재 방식
+--------------
+
+이 문서에서 "현재 방식"은 score-model-spec.json의 modelVersion
+tfm2gg-meta-v1과 app.js/build_meta_data.py에 구현된 현재 메타 계산 모델을 의미한다.
+
+현재 방식은 다음 값을 계산한다.
+
+- posteriorMean: 현재 데이터 평균을 prior로 둔 보정 승률 평균
+- posteriorLower: posteriorMean의 보수 하한
+- strengthScore: posteriorMean과 posteriorLower를 결합한 순수 강도 점수
+- strengthLower: posteriorLower 기반 보수 강도 점수
+- presence: 픽률/밴률을 결합한 노출도
+- draftPressureScore: 평균 노출도 대비 현재 챔피언의 드래프트 압력 점수
+- metaScore: strengthScore와 draftPressureScore를 결합한 대표 메타 점수
+- metaLower: strengthLower와 draftPressureScore를 결합한 티어 산정용 보수 점수
+- metaTier: metaLower와 전체 백분위 기준으로 결정되는 OP/1/2/3/4/-
+
+
+1.3. 메타 스코어와 메타 티어의 역할 분리
+----------------------------------------
+
+현재 방식에서는 metaScore와 metaTier가 같은 것이 아니다.
+
+metaScore:
+
+- 0~100 스케일의 대표 점수다.
+- 현재 챔피언이 얼마나 강하고, 얼마나 메타에서 노출/견제되는지를 보여준다.
+- 정렬, 비교, 상세 설명에 적합하다.
+
+metaTier:
+
+- OP/1/2/3/4/- 라벨이다.
+- metaLower라는 보수 점수와 전체 순위 백분위를 같이 사용한다.
+- "이 챔피언을 티어표에서 어디에 놓을 것인가"를 결정한다.
+
+이 분리가 중요하다. 현재 방식은 metaScore가 약간 높다고 바로 OP가 되는 구조가
+아니다. 티어는 보수 하한과 상위 비율 조건까지 통과해야 올라간다.
+
+
+2. 예전 방식의 정확한 산식
+==========================
+
+2.1. 입력값
+-----------
+
+예전 방식에서 사용하는 핵심 입력값은 사실상 두 개다.
+
+- pickCount
+- winRate
+
+보조적으로 winRate는 다음 통계에서 만들어진다.
+
+winRate = wins / pickCount * 100
+
+단, pickCount가 0이거나 winRate가 없으면 티어 계산이 불가능하다.
+
+
+2.2. 최소 표본 기준
+-------------------
+
+예전 방식의 최소 표본은 고정 5픽이다.
+
+if pickCount < 5 or winRate is None:
+    tier = "-"
+
+이 기준은 단순하고 빠르지만, 데이터 상황을 구분하지 못한다.
+
+예를 들어:
+
+- 패치 직후 5픽은 어느 정도 현실적인 최소 기준일 수 있다.
+- 그러나 일반적인 시점의 5픽은 매우 불안정한 표본일 수 있다.
+- 역할/지역 필터처럼 표본이 좁아지는 환경에서도 같은 5픽 기준을 쓰면
+  티어 변동성이 커질 수 있다.
+
+
+2.3. 티어 컷
+------------
+
+예전 티어 컷은 다음과 같다.
+
+if winRate >= 62:
+    tier = "OP"
+elif winRate >= 57:
+    tier = "1"
+elif winRate >= 53:
+    tier = "2"
+elif winRate >= 49:
+    tier = "3"
+else:
+    tier = "4"
+
+정리하면:
+
+- OP: 승률 62% 이상
+- 1티어: 승률 57% 이상 62% 미만
+- 2티어: 승률 53% 이상 57% 미만
+- 3티어: 승률 49% 이상 53% 미만
+- 4티어: 승률 49% 미만
+- -: 5픽 미만 또는 승률 없음
+
+
+2.4. 예전 방식의 사실상 메타 점수
+---------------------------------
+
+예전 방식에는 현재처럼 표시되는 metaScore 모델이 없었다. 만약 예전 방식의
+"메타 판단 값"을 수식화하면 다음에 가깝다.
+
+oldMetaSignal = rawWinRate
+
+oldMetaTier = fixedCut(rawWinRate, minSample=5)
+
+즉 승률 자체가 거의 유일한 메타 신호였다.
+
+
+2.5. 예전 방식의 장점
+---------------------
+
+예전 방식은 완전히 나쁜 방식은 아니다. 장점도 분명하다.
+
+1. 이해가 쉽다.
+
+   누구나 "승률 62% 이상이면 OP"라는 식으로 바로 이해할 수 있다.
+
+2. 계산이 빠르다.
+
+   별도 모델, prior, baseline, source counter가 필요 없다.
+
+3. 데이터가 충분하고 단일 환경일 때는 대략적인 강픽을 빠르게 볼 수 있다.
+
+   예를 들어 모든 챔피언이 충분히 많이 픽되고 밴 데이터가 중요하지 않은
+   환경이라면, 승률 컷도 대략적인 참고 자료로는 쓸 수 있다.
+
+
+2.6. 예전 방식의 구조적 한계
+----------------------------
+
+그러나 예전 방식은 TFM2.gg가 다루는 데이터 특성과 잘 맞지 않는 부분이 많다.
+
+한계 1. 표본 수를 5픽 이후로는 구분하지 않는다.
+
+예:
+
+- 챔피언 A: 5픽 4승, 승률 80%
+- 챔피언 B: 120픽 68승, 승률 56.7%
+
+예전 방식에서는 A가 압도적으로 높아 보인다. 하지만 통계적으로는 B의 정보량이
+훨씬 많다. 예전 방식은 5픽과 120픽의 신뢰도 차이를 티어 계산에 충분히 반영하지
+못한다.
+
+한계 2. 밴률을 메타 신호로 쓰지 않는다.
+
+Teamfight Manager 2, 특히 피어리스/하드 피어리스 환경에서는 강한 픽이 자주
+밴으로 묶인다. 이 경우 강픽은 픽률이 낮고, 승률 표본도 적을 수 있다.
+
+예전 방식은 "픽된 경기의 승률"만 보므로 다음 유형을 놓치기 쉽다.
+
+- 자주 밴되어 픽 표본이 적은 OP 챔피언
+- 상대가 주지 않으려 해서 실제 위협도는 높은 챔피언
+- 밴률은 높지만 승률 표본이 늦게 쌓이는 챔피언
+
+한계 3. 픽률을 보조 신호로 쓰지 않는다.
+
+승률이 같아도 픽률이 높은 챔피언과 픽률이 낮은 챔피언의 의미는 다르다.
+
+- 높은 픽률 + 괜찮은 승률: 넓게 써도 안정적인 챔피언일 가능성
+- 낮은 픽률 + 높은 승률: 특정 조건, 특정 역할, 소표본일 가능성
+
+예전 방식은 이 차이를 구분하지 못한다.
+
+한계 4. 진행 방식 차이를 반영하지 않는다.
+
+클래식, 피어리스, 하드 피어리스는 밴픽 구조가 다르다.
+
+- 클래식: 좋은 챔피언을 반복 활용할 수 있어 픽률 의미가 비교적 크다.
+- 피어리스: 한 번 사용한 픽을 다시 쓰기 어렵기 때문에 픽률이 분산된다.
+- 하드 피어리스: 강픽이 밴으로 잠기는 비중이 커져 밴률 신호가 중요해진다.
+
+예전 방식은 이 차이를 가중치에 반영하지 않았다.
+
+한계 5. 전체 순위 구조를 보지 않는다.
+
+승률 62% 이상이면 모두 OP가 될 수 있고, 승률 57% 이상이면 모두 1티어가 될 수
+있다. 특정 세이브에서 데이터 분포가 한쪽으로 치우치면 OP/1티어가 지나치게
+많거나 적어질 수 있다.
+
+
+3. 현재 방식의 전체 계산 흐름
+=============================
+
+현재 방식의 핵심 계산 흐름은 다음과 같다.
+
+1. 현재 선택된 범위의 stat row를 결정한다.
+   - overall / tournament / solo
+   - patch
+   - role
+   - region / division / league / competition split
+
+2. 표본 기준을 결정한다.
+   - manual early: 5픽
+   - manual normal: 10픽
+   - auto: 패치 후 경과일 또는 경기 수로 5/10픽 자동 선택
+
+3. 현재 범위에서 승률 prior를 추정한다.
+   - priorMean
+   - priorKappa
+
+4. 챔피언별 승률 posterior를 계산한다.
+   - posteriorMean
+   - posteriorSd
+   - posteriorLower
+
+5. 순수 강도 점수를 계산한다.
+   - strengthScore
+   - strengthLower
+
+6. 현재 범위의 노출도 baseline을 계산한다.
+   - source별 pick baseline
+   - source별 ban baseline
+   - source별 presence baseline
+   - 전체 baselinePresence
+
+7. 챔피언별 source-normalized presence를 계산한다.
+
+8. draftPressureScore를 계산한다.
+
+9. 프리셋별 가중치로 metaScore와 metaLower를 계산한다.
+
+10. eligible 챔피언을 metaLower 기준으로 정렬한다.
+
+11. metaLower 조건과 백분위 조건으로 metaTier를 결정한다.
+
+
+4. 현재 방식 1단계: 데이터 범위와 source 분리
+=============================================
+
+4.1. 범위 scope
+---------------
+
+현재 대시보드는 다음 범위를 지원한다.
+
+- overall: 대회 + 솔랭 결합
+- tournament: 대회/리플레이/익스포트 기반 통계
+- solo: 솔랭 익스포트 기반 통계
+
+각 범위는 같은 산식을 쓰지만, ban 데이터 사용 가능 여부가 다르다.
+
+- tournament: pick + ban 둘 다 가능
+- overall: tournament ban + solo pick/win 결합
+- solo: ban 데이터 없음
+- role filter: 역할별 pick/win은 가능하지만, ban의 역할 의도는 확정 불가능
+
+
+4.2. source counter
+-------------------
+
+현재 모델은 source별 기여를 보존한다.
+
+- sourceMatchCounts[source]
+- sourcePickCounts[source]
+- sourceBanCounts[source]
+
+예:
+
+overall에서 tournament와 solo가 같이 있으면:
+
+sourceMatchCounts = {
+  tournament: tournament_total,
+  solo: solo_total
+}
+
+sourcePickCounts = {
+  tournament: tournament_picks,
+  solo: solo_picks
+}
+
+sourceBanCounts = {
+  tournament: tournament_bans,
+  solo: 0
+}
+
+이 구조가 중요한 이유는 solo에는 ban이 없기 때문이다. 단순히 overall banRate를
+전체 totalMatch로 나누면 solo 데이터가 ban denominator를 오염시킬 수 있다.
+현재 방식은 source별로 pick/ban 노출을 계산한 뒤 match count로 가중 평균한다.
+
+
+4.3. 역할 필터의 특수 처리
+--------------------------
+
+역할 필터에서는 다음처럼 stat row를 재구성한다.
+
+- pickCount = 해당 역할로 출전한 경기 수
+- wins = 해당 역할 승수
+- winRate = wins / pickCount * 100
+- pickRate = roleMatches / totalRoleOpportunities * 100
+- banRate = null
+- sourceMatchCounts = { role: totalRoleOpportunities }
+- sourcePickCounts = { role: roleMatches }
+- sourceBanCounts = { role: 0 }
+
+역할 필터에서 banRate를 계산에 넣지 않는 이유:
+
+밴은 "이 챔피언이 밴됐다"만 알려줄 뿐, 그 밴이 탑 견제인지, 미드 견제인지,
+정글 견제인지 알 수 없다. 멀티포지션 챔피언의 경우 전체 밴률을 특정 역할에
+넣으면 역할별 메타가 오염된다.
+
+따라서 현재 방식은 역할 계산에서는 밴률을 제외하고, 화면 표시에서는 필요할 때
+"밴률 (전체)"로만 참고 표시한다.
+
+
+5. 현재 방식 2단계: 표본 기준
+=============================
+
+5.1. 예전 방식과의 차이
+-----------------------
+
+예전 방식:
+
+- 최소 표본 = 5픽 고정
+
+현재 방식:
+
+- early: 5픽
+- normal: 10픽
+- auto: 날짜/경기 수 기반으로 5픽 또는 10픽 자동 선택
+
+
+5.2. 현재 auto sample mode
+--------------------------
+
+현재 auto sample mode는 다음 순서로 동작한다.
+
+1. daysSincePatch가 있으면 날짜 기준을 사용한다.
+
+   if daysSincePatch >= 3:
+       minSample = 10
+       mode = normal
+   else:
+       minSample = 5
+       mode = early
+
+2. daysSincePatch가 없으면 현재 범위의 경기량을 사용한다.
+
+   if scopedMatchVolume >= 100:
+       minSample = 10
+       mode = normal
+   else:
+       minSample = 5
+       mode = early
+
+scopedMatchVolume:
+
+- 전체 역할: max(totalMatch, totalPickCount / 10)
+- 특정 역할: sum(byPosition[role].matches)
+
+
+5.3. 해석
+---------
+
+패치 직후에는 데이터가 적기 때문에 5픽 기준을 허용한다. 하지만 일정 시간이 지나거나
+경기 수가 충분하면 10픽으로 올려 더 보수적으로 판단한다.
+
+이 변경은 예전 방식의 가장 큰 약점인 "5픽 고정" 문제를 줄인다.
+
+
+6. 현재 방식 3단계: Bayesian 승률 보정
+======================================
+
+6.1. 왜 필요한가
+----------------
+
+원시 승률은 표본 수에 매우 민감하다.
+
+예:
+
+- 5픽 4승 = 80%
+- 50픽 30승 = 60%
+- 200픽 112승 = 56%
+
+원시 승률만 보면 5픽 80%가 가장 좋아 보인다. 하지만 통계적으로는 5픽 정보가
+가장 불안정하다.
+
+현재 방식은 이 문제를 줄이기 위해 Bayesian posterior를 쓴다.
+
+
+6.2. priorMean
+--------------
+
+현재 선택된 범위에서 유효한 챔피언들의 전체 승률 평균을 priorMean으로 둔다.
+
+priorMean = totalWins / totalPicks
+
+유효한 pick 데이터가 없으면 fallbackPriorMean을 쓴다.
+
+fallbackPriorMean = 0.5
+
+그리고 priorMean은 다음 범위로 clamp된다.
+
+priorMean ∈ [0.001, 0.999]
+
+
+6.3. kappa
+----------
+
+kappa는 prior의 강도다. 값이 클수록 개별 챔피언 승률을 전체 평균 쪽으로 더
+강하게 당긴다.
+
+현재 방식은 데이터의 관측 분산에서 샘플링 노이즈를 빼서 champion 간 실제 분산을
+추정하고, 그 값으로 kappa를 계산한다.
+
+각 챔피언 i에 대해:
+
+rate_i = wins_i / picks_i
+
+observedVar = sampleVariance(rate_i)
+
+noiseVar = average(priorMean * (1 - priorMean) / picks_i)
+
+betweenVar = max(observedVar - noiseVar, 0.0005)
+
+kappa = priorMean * (1 - priorMean) / betweenVar - 1
+
+이후 mode에 따라 kappa를 clamp한다.
+
+- early: [8, 50]
+- normal: [12, 80]
+- role: [18, 100]
+
+유효 row가 2개 미만이면:
+
+kappa = clamp(24, low, high)
+
+
+6.4. posterior 계산
+-------------------
+
+챔피언별로:
+
+trials = pickCount
+successes = wins
+failures = trials - successes
+
+alpha = successes + priorMean * kappa
+
+beta = max(0.001, failures) + (1 - priorMean) * kappa
+
+total = alpha + beta
+
+posteriorMean = alpha / total
+
+posteriorSd = sqrt((alpha * beta) / (total^2 * (total + 1)))
+
+posteriorLower = clamp(posteriorMean - z * posteriorSd, 0, 1)
+
+현재 z:
+
+z = 0.84
+
+
+6.5. 해석
+---------
+
+posteriorMean은 보정 승률 평균이다.
+
+posteriorLower는 보수 하한이다. 원시 승률이 높아도 표본이 적으면 posteriorSd가
+커지고, posteriorLower가 낮아진다.
+
+이 때문에 현재 방식은 "운 좋게 5판 잘 이긴 챔피언"을 예전보다 덜 과대평가한다.
+
+
+7. 현재 방식 4단계: 순수 강도 점수
+==================================
+
+7.1. strengthScore
+------------------
+
+현재 방식의 순수 강도 점수는 다음과 같다.
+
+strengthScore =
+  100 * (0.7 * posteriorMean + 0.3 * posteriorLower)
+
+즉 보정 평균을 70%, 보수 하한을 30% 반영한다.
+
+
+7.2. strengthLower
+------------------
+
+티어 산정용 보수 강도는 다음과 같다.
+
+strengthLower =
+  100 * posteriorLower
+
+
+7.3. 예전 방식과의 차이
+-----------------------
+
+예전 방식:
+
+scoreSignal = rawWinRate
+
+현재 방식:
+
+scoreSignal = 0.7 * posteriorMean + 0.3 * posteriorLower
+
+즉 현재 방식은 단순 승률이 아니라, 표본 신뢰도를 반영한 승률 추정값을 쓴다.
+
+
+8. 현재 방식 5단계: 노출도 presence
+==================================
+
+8.1. 왜 pickRate + banRate 단순합이 아닌가
+------------------------------------------
+
+픽률과 밴률은 같은 경기에서 동시에 발생하지 않는 이벤트가 아니다. 한 챔피언이
+픽되거나 밴되면 해당 챔피언은 드래프트에서 노출된 것이다.
+
+단순히 pickRate + banRate를 더하면 값이 100%를 넘거나, event overlap 의미가
+부정확해질 수 있다.
+
+현재 방식은 다음 식을 사용한다.
+
+presence = 1 - (1 - pickRate) * (1 - banRate)
+
+이는 "픽되지도 않고 밴되지도 않을 확률"의 여집합이다.
+
+
+8.2. source별 baseline
+----------------------
+
+각 source에 대해:
+
+pickBase_source = totalSourcePicks / totalSourceMatches
+
+banBase_source = totalSourceBans / totalSourceMatches
+
+ban 데이터가 있는 source:
+
+presenceBase_source =
+  1 - (1 - pickBase_source) * (1 - banBase_source)
+
+ban 데이터가 없는 source:
+
+presenceBase_source =
+  pickBase_source
+
+그리고 전체 baselinePresence:
+
+baselinePresence =
+  sum(presenceBase_source * sourceMatches) / sum(sourceMatches)
+
+fallback:
+
+- pickBase = 0.1
+- banBase = 0.05
+- baselinePresence = 0.145
+
+
+8.3. 챔피언별 posterior rate
+----------------------------
+
+presence에도 smoothing이 적용된다.
+
+pickPost_source =
+  (sourcePicks + pickBase_source * ratePriorKappa)
+  / (sourceMatches + ratePriorKappa)
+
+banPost_source =
+  (sourceBans + banBase_source * ratePriorKappa)
+  / (sourceMatches + ratePriorKappa)
+
+현재 ratePriorKappa:
+
+ratePriorKappa = 20
+
+ban 데이터가 있는 source:
+
+presence_source =
+  1 - (1 - pickPost_source) * (1 - banPost_source)
+
+ban 데이터가 없는 source:
+
+presence_source =
+  pickPost_source
+
+최종 presence:
+
+presence =
+  sum(presence_source * sourceMatches) / sum(sourceMatches)
+
+
+8.4. 해석
+---------
+
+이 구조는 몇 가지 장점이 있다.
+
+1. solo처럼 ban 데이터가 없는 source를 안전하게 처리한다.
+
+2. tournament와 solo를 섞을 때 denominator 오염을 줄인다.
+
+3. 작은 source에서 pick/ban이 1~2번 발생해도 smoothing으로 과도한 압력을 줄인다.
+
+4. 현재 범위의 평균 노출도 대비 상대적 드래프트 압력을 만들 수 있다.
+
+
+9. 현재 방식 6단계: draftPressureScore
+======================================
+
+9.1. 산식
+---------
+
+draftPressureScore =
+  clamp(
+    50 + pressureScale * ln((presence + eps) / (baselinePresence + eps)),
+    0,
+    100
+  )
+
+현재 파라미터:
+
+- pressureScale = 16
+- eps = 0.001
+
+
+9.2. 해석
+---------
+
+draftPressureScore는 현재 챔피언의 presence가 평균 baselinePresence보다 얼마나
+높거나 낮은지를 로그 비율로 변환한 점수다.
+
+- draftPressureScore = 50:
+  현재 범위 평균 수준의 노출도
+
+- draftPressureScore > 50:
+  평균보다 더 자주 픽/밴되는 챔피언
+
+- draftPressureScore < 50:
+  평균보다 덜 노출되는 챔피언
+
+로그 비율을 쓰는 이유는 상대 비율을 더 안정적으로 보기 위해서다.
+
+예:
+
+- 평균 5%에서 10%로 증가: 2배
+- 평균 20%에서 25%로 증가: 1.25배
+
+단순 차이로 보면 둘 다 +5%p지만, 메타 신호로는 전자가 더 강한 변화일 수 있다.
+로그 비율은 이 차이를 반영한다.
+
+
+10. 현재 방식 7단계: metaScore
+==============================
+
+10.1. 기본 구조
+---------------
+
+현재 metaScore는 다음 두 값을 결합한다.
+
+- strengthScore: 보정 승률 기반 순수 강도
+- draftPressureScore: 픽률/밴률 기반 드래프트 압력
+
+일반형:
+
+metaScore =
+  metaStrengthWeight * strengthScore
+  + metaPressureWeight * draftPressureScore
+
+metaLower =
+  lowerStrengthWeight * strengthLower
+  + lowerPressureWeight * draftPressureScore
+
+metaScore와 metaLower는 모두 0~100으로 clamp되고, 표시 시 0.1 단위로 반올림된다.
+
+
+10.2. classic preset
+--------------------
+
+classic:
+
+metaScore =
+  0.84 * strengthScore
+  + 0.16 * draftPressureScore
+
+metaLower =
+  0.88 * strengthLower
+  + 0.12 * draftPressureScore
+
+해석:
+
+클래식은 승률/순수 성능 중심이다. 같은 챔피언을 반복해서 쓸 수 있는 환경이므로,
+밴픽 압력보다 실제 성능 신호를 더 중시한다.
+
+
+10.3. fearless preset
+---------------------
+
+fearless:
+
+metaScore =
+  0.78 * strengthScore
+  + 0.22 * draftPressureScore
+
+metaLower =
+  0.82 * strengthLower
+  + 0.18 * draftPressureScore
+
+해석:
+
+피어리스는 한 번 사용한 챔피언을 다시 쓰기 어렵다. 그래서 순수 승률만 보면
+분산된 픽의 메타 신호를 놓칠 수 있다. classic보다 draftPressureWeight가 높다.
+
+
+10.4. hardFearless preset
+-------------------------
+
+hardFearless:
+
+metaScore =
+  0.72 * strengthScore
+  + 0.28 * draftPressureScore
+
+metaLower =
+  0.78 * strengthLower
+  + 0.22 * draftPressureScore
+
+해석:
+
+하드 피어리스는 강한 픽이 밴으로 잠기기 쉽고, 좋은 픽이 한 번 사용되면 반복
+활용되기 어렵다. 따라서 밴률/픽률 기반 압력의 중요도가 가장 높다.
+
+
+10.5. 예전 방식과의 직접 비교
+------------------------------
+
+예전:
+
+oldSignal = rawWinRate
+
+현재:
+
+currentMetaScore =
+  W_strength * [100 * (0.7 * posteriorMean + 0.3 * posteriorLower)]
+  + W_pressure * [50 + 16 * ln((presence + 0.001) / (baselinePresence + 0.001))]
+
+예전은 rawWinRate 하나만 봤다.
+
+현재는 다음을 모두 본다.
+
+- 전체 데이터 평균 승률
+- 챔피언별 pickCount
+- wins/losses
+- posterior uncertainty
+- pickRate
+- banRate
+- source별 totalMatch
+- source별 pick/ban count
+- 현재 범위의 평균 presence
+- 진행 방식 프리셋
+- role/scope/patch/split filter
+
+
+11. 현재 방식 8단계: reliability
+================================
+
+현재 방식은 설명/꿀챔 점수용으로 reliability도 계산한다.
+
+reliability =
+  sqrt(pickCount / (pickCount + minSample * 2))
+
+표시:
+
+reliabilityPercent = reliability * 100
+
+예:
+
+minSample = 10일 때:
+
+- pickCount = 10:
+  reliability = sqrt(10 / 30) ≈ 57.7%
+
+- pickCount = 40:
+  reliability = sqrt(40 / 60) ≈ 81.6%
+
+- pickCount = 100:
+  reliability = sqrt(100 / 120) ≈ 91.3%
+
+이 값은 metaScore 자체의 직접 가중치라기보다, 현재 표본 신뢰도를 설명하고 꿀챔
+점수에서 score amplitude를 조절하는 데 쓰인다.
+
+
+12. 현재 메타 티어 산식
+=======================
+
+12.1. eligible 조건
+-------------------
+
+챔피언은 다음 조건을 만족해야 티어 산정에 들어간다.
+
+- winRate가 유효해야 한다.
+- pickCount >= minSample이어야 한다.
+
+그렇지 않으면:
+
+- eligible = false
+- tier = "-"
+- metaScore = null
+
+
+12.2. 정렬 기준
+---------------
+
+eligible 챔피언은 다음 순서로 정렬된다.
+
+1. metaLower descending
+2. metaScore descending
+3. winRate descending
+4. pickCount descending
+5. championName ascending
+
+이 정렬에서 metaLower가 가장 우선이다.
+
+이유:
+
+티어는 대표 점수보다 보수 하한을 더 중요하게 본다. 이는 소표본 고점 챔피언을
+바로 OP로 올리지 않기 위한 안전장치다.
+
+
+12.3. 백분위
+------------
+
+정렬된 eligible champion에서:
+
+percentile = (index + 1) / eligibleCount
+
+가장 높은 챔피언의 percentile은 1 / eligibleCount다.
+
+
+12.4. 티어 컷
+-------------
+
+현재 티어 컷:
+
+OP:
+  metaLower >= 56
+  and percentile <= 0.08
+
+1 tier:
+  metaLower >= 51
+  and percentile <= 0.22
+
+2 tier:
+  metaLower >= 48
+  and percentile <= 0.45
+
+3 tier:
+  metaLower >= 44
+  and percentile <= 0.70
+
+4 tier:
+  eligible이지만 위 조건에 걸리지 않은 챔피언
+
+-:
+  not eligible
+
+
+12.5. 예전 티어와의 차이
+------------------------
+
+예전:
+
+- winRate가 컷을 넘으면 해당 티어
+- 전체 챔피언 중 몇 위인지는 직접 고려하지 않음
+
+현재:
+
+- metaLower가 컷을 넘어야 함
+- 동시에 전체 eligible 중 상위 백분위 조건도 만족해야 함
+
+예를 들어 어떤 세이브에서 많은 챔피언이 metaLower 51을 넘더라도, 상위 22% 안에
+들지 못하면 1티어가 되지 않는다.
+
+반대로 점수 분포가 낮은 세이브에서 상위권이라도 metaLower가 51 미만이면 1티어가
+되지 않는다.
+
+즉 현재 방식은 절대 기준과 상대 기준을 동시에 사용한다.
+
+
+13. 꿀챔 점수와 메타 스코어의 관계
+==================================
+
+13.1. 꿀챔 점수는 메타 스코어의 대체재가 아니다
+-------------------------------------------------
+
+현재 모델에는 꿀챔 점수도 있다. 하지만 꿀챔 점수는 metaScore를 대체하지 않는다.
+
+metaScore:
+
+- "이 챔피언이 순수하게 강하고 메타에서 얼마나 압박받는가"
+
+honeyScore:
+
+- "강한 정도에 비해 덜 픽/밴되고 있는가, 아니면 과하게 노출되고 있는가"
+
+
+13.2. 꿀챔 점수 요약 산식
+-------------------------
+
+valid champion들에 대해:
+
+X = strengthScore
+Y = presencePercent
+
+strengthScore와 presence의 관계를 회귀로 추정한다.
+
+expectedPresence =
+  clamp(intercept + slope * strengthScore, baselinePresence * 50, max(5, maxPresence))
+
+residual =
+  expectedPresence - actualPresence
+
+strengthPercentile = percentileRank(strengthScore)
+
+exposurePercentile = percentileRank(actualPresence)
+
+rankGap =
+  strengthPercentile - exposurePercentile
+
+residualGap =
+  clamp(residual / adaptiveResidualDivisor, -1, 1)
+
+signedHoneyScore =
+  clamp(
+    100 * reliability * (0.72 * rankGap + 0.28 * residualGap),
+    -100,
+    100
+  )
+
+
+13.3. 해석
+----------
+
+honeyScore > 0:
+
+- 강도에 비해 노출이 낮다.
+- 숨은 픽, 저평가 후보일 수 있다.
+
+honeyScore < 0:
+
+- 강도에 비해 노출이 높다.
+- 과픽, 과밴, 과대평가 후보일 수 있다.
+
+honeyScore ≈ 0:
+
+- 강도와 노출이 대체로 맞아 있다.
+
+
+14. 예전 방식과 현재 방식의 사례별 비교
+=======================================
+
+14.1. 소표본 고승률 챔피언
+---------------------------
+
+상황:
+
+- pickCount = 5
+- wins = 4
+- rawWinRate = 80%
+
+예전 방식:
+
+- 5픽 이상
+- 승률 80%
+- OP
+
+현재 방식:
+
+- posteriorMean이 전체 평균 쪽으로 당겨진다.
+- posteriorSd가 크다.
+- posteriorLower가 낮아진다.
+- strengthScore가 raw 80점처럼 나오지 않는다.
+- metaLower가 충분하지 않으면 OP가 되지 않는다.
+- 전체 백분위 조건도 통과해야 한다.
+
+개선점:
+
+소표본 대박값이 바로 티어표 최상단을 먹는 현상이 줄어든다.
+
+
+14.2. 고밴률 저픽률 챔피언
+--------------------------
+
+상황:
+
+- pickCount는 낮다.
+- banCount는 높다.
+- winRate 표본은 많지 않다.
+
+예전 방식:
+
+- 픽된 경기 승률이 충분히 쌓이지 않으면 저평가될 수 있다.
+- 밴률은 티어 계산에 사실상 들어가지 않는다.
+
+현재 방식:
+
+- tournament/overall 기준에서 banRate가 presence에 들어간다.
+- presence가 baseline보다 높으면 draftPressureScore가 상승한다.
+- hardFearless에서는 draftPressureScore 가중치가 더 크다.
+
+개선점:
+
+상대가 주지 않으려는 강픽을 더 잘 포착한다.
+
+
+14.3. 많이 픽되지만 승률이 애매한 챔피언
+----------------------------------------
+
+상황:
+
+- pickRate 높음
+- winRate는 평균 근처
+
+예전 방식:
+
+- 승률만 보므로 3~4티어로 내려갈 수 있다.
+
+현재 방식:
+
+- strengthScore는 평균 근처일 수 있다.
+- 하지만 presence가 높으면 draftPressureScore가 올라간다.
+- 다만 strengthLower가 낮으면 높은 티어로 무조건 올라가지는 않는다.
+
+개선점:
+
+범용성과 실제 사용 빈도는 반영하되, 승률 하한이 낮은 챔피언을 무조건 OP로 만들지
+않는다.
+
+
+14.4. 역할 필터 챔피언
+----------------------
+
+상황:
+
+- 전체 챔피언 밴률은 높다.
+- 특정 역할에서만 보면 픽/승률 표본이 따로 있다.
+
+예전 방식:
+
+- 역할별 모델 자체가 단순하거나 전체 통계와 섞이기 쉽다.
+
+현재 방식:
+
+- role stat은 role pick/win 기반으로 재구성한다.
+- role 계산에서는 banRate를 null 처리한다.
+- sourceBanCounts = { role: 0 }로 둔다.
+- 밴률은 화면에서 "밴률 (전체)"로만 참고 표시한다.
+
+개선점:
+
+밴의 역할 의도를 모르는 상태에서 전체 밴률을 특정 역할 메타 점수에 섞는 오염을
+피한다.
+
+
+15. 현재 방식의 장점 종합
+=========================
+
+15.1. 통계적 안정성
+-------------------
+
+현재 방식은 원시 승률 대신 posteriorMean/posteriorLower를 사용한다.
+
+효과:
+
+- 소표본 고승률 과대평가 감소
+- 소표본 저승률 과소평가 완화
+- 표본이 커질수록 raw data에 더 가까워짐
+- 표본이 작을수록 현재 field average를 반영
+
+
+15.2. 밴픽 구조 반영
+--------------------
+
+현재 방식은 대회/전체 기준에서 pickRate와 banRate를 presence로 결합한다.
+
+효과:
+
+- 밴으로 잠기는 OP픽 반영
+- 많이 쓰이는 범용픽 반영
+- 단순 승률표보다 실제 드래프트 압력에 가까움
+
+
+15.3. 진행 방식별 해석 차이 반영
+---------------------------------
+
+현재 방식은 classic/fearless/hardFearless 프리셋을 지원한다.
+
+효과:
+
+- 클래식: 성능 중심
+- 피어리스: 성능 + 드래프트 압력 균형
+- 하드 피어리스: 밴픽 압력 비중 증가
+
+게임 규칙에 맞는 티어 판단이 가능하다.
+
+
+15.4. absolute + relative tier gate
+----------------------------------
+
+현재 metaTier는 metaLower 절대 기준과 백분위 기준을 같이 사용한다.
+
+효과:
+
+- 특정 세이브에서 OP/1티어가 과도하게 늘어나는 문제 감소
+- 전체적으로 점수가 낮은 환경에서 억지 OP가 생기는 문제 감소
+- 티어표가 더 읽기 쉬움
+
+
+15.5. source별 denominator 안정성
+---------------------------------
+
+overall에서 tournament와 solo를 합칠 때 source counter를 보존한다.
+
+효과:
+
+- solo에 ban 데이터가 없다는 사실을 모델이 인식
+- tournament ban denominator와 solo match denominator가 무리하게 섞이지 않음
+- 지역/범위/역할 필터에서 더 안정적
+
+
+16. 현재 방식의 한계와 해석 주의점
+==================================
+
+16.1. 데이터가 거의 없으면 모델도 보수적일 수밖에 없다
+-------------------------------------------------------
+
+표본이 부족한 챔피언은 metaScore를 억지로 만들지 않는다.
+
+이는 "정보 없음"을 "낮은 점수"로 오해하지 않게 하기 위한 설계다.
+
+
+16.2. 밴 데이터의 한계
+----------------------
+
+밴은 챔피언 단위로만 확정 가능하다.
+
+역할별 밴 의도는 확정할 수 없다.
+
+따라서 역할 필터에서는 밴률을 계산에 넣지 않고, 전체 밴률을 참고 표시만 한다.
+
+
+16.3. draftPressureScore는 "좋음"과 완전히 같은 뜻이 아니다
+-----------------------------------------------------------
+
+draftPressureScore가 높다는 것은 "많이 픽/밴된다"는 뜻이다.
+
+많이 픽/밴되는 이유는 대체로 강함과 관련이 있지만, 항상 순수 성능만을 의미하지는
+않는다.
+
+그래서 현재 방식은 draftPressureScore만 쓰지 않고 strengthScore와 결합한다.
+
+
+16.4. metaScore와 honeyScore는 다른 질문에 답한다
+------------------------------------------------
+
+metaScore:
+
+- 이 챔피언이 강한가?
+- 메타에서 얼마나 중요하게 다뤄지는가?
+
+honeyScore:
+
+- 강한 정도에 비해 덜 알려졌는가?
+- 또는 과하게 노출되었는가?
+
+honeyScore가 높다고 항상 OP라는 뜻은 아니다.
+
+
+17. 수식 요약
+=============
+
+17.1. 예전 방식
+---------------
+
+rawWinRate =
+  wins / pickCount * 100
+
+if pickCount < 5 or rawWinRate is None:
+  tier = "-"
+elif rawWinRate >= 62:
+  tier = "OP"
+elif rawWinRate >= 57:
+  tier = "1"
+elif rawWinRate >= 53:
+  tier = "2"
+elif rawWinRate >= 49:
+  tier = "3"
+else:
+  tier = "4"
+
+사실상:
+
+oldMetaSignal = rawWinRate
+
+
+17.2. 현재 방식
+---------------
+
+priorMean =
+  totalWins / totalPicks
+
+kappa =
+  clamp(priorMean * (1 - priorMean) / betweenVar - 1, modeLow, modeHigh)
+
+alpha =
+  wins + priorMean * kappa
+
+beta =
+  losses + (1 - priorMean) * kappa
+
+posteriorMean =
+  alpha / (alpha + beta)
+
+posteriorSd =
+  sqrt(alpha * beta / ((alpha + beta)^2 * (alpha + beta + 1)))
+
+posteriorLower =
+  clamp(posteriorMean - 0.84 * posteriorSd, 0, 1)
+
+strengthScore =
+  100 * (0.7 * posteriorMean + 0.3 * posteriorLower)
+
+strengthLower =
+  100 * posteriorLower
+
+presence =
+  source-weighted smoothed pick/ban presence
+
+draftPressureScore =
+  clamp(50 + 16 * ln((presence + 0.001) / (baselinePresence + 0.001)), 0, 100)
+
+classic metaScore =
+  0.84 * strengthScore + 0.16 * draftPressureScore
+
+fearless metaScore =
+  0.78 * strengthScore + 0.22 * draftPressureScore
+
+hardFearless metaScore =
+  0.72 * strengthScore + 0.28 * draftPressureScore
+
+classic metaLower =
+  0.88 * strengthLower + 0.12 * draftPressureScore
+
+fearless metaLower =
+  0.82 * strengthLower + 0.18 * draftPressureScore
+
+hardFearless metaLower =
+  0.78 * strengthLower + 0.22 * draftPressureScore
+
+metaTier =
+  tierCut(metaLower, percentile)
+
+
+18. 최종 평가
+=============
+
+예전 방식은 "빠른 승률 기반 티어표"로는 쓸 수 있었다. 하지만 Teamfight Manager 2의
+실제 메타를 판단하기에는 다음 문제가 있었다.
+
+- 소표본 승률에 민감하다.
+- 밴률을 중요한 메타 신호로 쓰지 못한다.
+- 피어리스/하드 피어리스의 규칙 차이를 반영하지 못한다.
+- 전체 순위 구조를 보지 못한다.
+- role/solo/overall/source별 denominator 차이에 약하다.
+
+현재 방식은 이 문제를 다음 방식으로 보완한다.
+
+- Bayesian posterior로 승률을 보정한다.
+- posteriorLower를 써서 티어 산정을 보수화한다.
+- pickRate와 banRate를 presence로 결합한다.
+- baselinePresence 대비 로그 비율로 draftPressureScore를 만든다.
+- classic/fearless/hardFearless 프리셋으로 진행 방식 차이를 반영한다.
+- metaLower와 percentile을 같이 써서 티어 분포를 안정화한다.
+- source counter를 보존해 solo/tournament/role 데이터를 더 안전하게 섞는다.
+
+따라서 현재 방식의 핵심 개선은 다음 한 문장으로 요약할 수 있다.
+
+예전 방식은 "승률이 높은 챔피언"을 빠르게 보여줬고, 현재 방식은 "표본 신뢰도,
+밴픽 압력, 진행 방식, 현재 데이터 분포를 고려했을 때 실제 메타에서 더 중요한
+챔피언"을 더 안정적으로 보여준다.
+
+
+19. 실무적 권장 해석
+====================
+
+대시보드를 볼 때는 다음처럼 해석하는 것이 좋다.
+
+1. 메타 티어를 먼저 본다.
+
+   OP/1/2/3/4는 현재 필터에서의 요약 라벨이다.
+
+2. 메타 스코어를 같이 본다.
+
+   같은 티어 안에서도 metaScore가 높으면 더 강한 신호다.
+
+3. 표본과 신뢰도를 확인한다.
+
+   표본이 적으면 모델이 보수적으로 당긴다. 이는 버그가 아니라 의도다.
+
+4. 밴률을 본다.
+
+   대회/전체에서는 밴률이 draftPressureScore에 반영된다.
+   역할 필터에서는 계산에 섞지 않고 밴률 (전체)로 참고만 한다.
+
+5. 꿀챔 점수는 별도로 본다.
+
+   꿀챔 점수는 "강하지만 덜 노출된 챔피언"을 찾는 보조 지표다.
+   메타 티어를 대체하지 않는다.
+
+
+20. 근거 파일
+=============
+
+현재 문서는 다음 구현을 기준으로 작성했다.
+
+- app.js
+  - metaScoreForStat
+  - tierForMetaRank
+  - assignHoneyScores
+  - role filter displayStatOf
+
+- build_meta_data.py
+  - calculated_tier
+  - score_model_entry
+  - build_policy_exports
+  - source normalized presence 계산 로직
+
+- score-model-spec.json
+  - modelVersion: tfm2gg-meta-v1
+  - posterior.z = 0.84
+  - posterior.kappa early/normal/role bounds
+  - posterior.ratePriorKappa = 20
+  - strength mean/lower weights
+  - pressure eps/scale
+  - classic/fearless/hardFearless weights
+  - tier cut thresholds
+  - honey score parameters
+
+- TFM2.gg_current_meta_formula_summary.txt
+  - 현재 산식 요약 문서
+

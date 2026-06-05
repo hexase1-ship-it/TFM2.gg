@@ -338,7 +338,7 @@ $manifest = [ordered]@{
     repository = "hexase1-ship-it/TFM2.gg"
     releaseAsset = "TFM2.gg_Distribution.zip"
     expectedGameFiles = [ordered]@{
-        "TeamfightManager2.exe" = 63975424
+        "TeamfightManager2.exe" = 63949824
         "bundle.game_data" = 1119930515
     }
     addons = @(

@@ -63,9 +63,10 @@ AI_BANPICK_MOD_ID = "tfm2_ai_banpick_probe"
 SOURCE_DASHBOARD_DIR_NAME = "TFM2_Meta_Dashboard_v0.3.3 (팀파매.gg)"
 
 EXPECTED_GAME_FILES = {
-    "TeamfightManager2.exe": 63_962_624,
-    "bundle.game_data": 1_119_929_218,
+    "TeamfightManager2.exe": 63_949_824,
+    "bundle.game_data": 1_119_930_515,
 }
+CRITICAL_GAME_FILES = {"bundle.game_data"}
 
 DEFAULT_GAME_DIR = Path(r"C:\Program Files (x86)\Steam\steamapps\common\Teamfight Manager2")
 
@@ -682,22 +683,42 @@ class InstallerModel:
         expected = self.expected_game_files()
         size_matches = 0
         size_checked = 0
+        critical_matches = 0
+        critical_failures = []
+        optional_mismatches = []
         for name, expected_size in expected.items():
             file_path = game_dir / name
+            is_critical = name in CRITICAL_GAME_FILES
             if not file_path.exists():
                 checks.append(ComponentStatus(False, name, "필수 파일 없음"))
+                if is_critical:
+                    critical_failures.append(name)
                 continue
             size_checked += 1
             actual = file_path.stat().st_size
             if int(actual) == int(expected_size):
                 size_matches += 1
+                if is_critical:
+                    critical_matches += 1
                 checks.append(ComponentStatus(True, name, f"{target_version} 기준 파일 크기 일치"))
             else:
+                detail = f"크기 다름: {actual:,} bytes (기대 {int(expected_size):,})"
+                if not is_critical:
+                    optional_mismatches.append(name)
+                    checks.append(
+                        ComponentStatus(
+                            True,
+                            name,
+                            f"실행 파일 빌드 차이 허용: {actual:,} bytes",
+                        )
+                    )
+                    continue
+                critical_failures.append(name)
                 checks.append(
                     ComponentStatus(
                         False,
                         name,
-                        f"크기 다름: {actual:,} bytes",
+                        detail,
                     )
                 )
 
@@ -712,7 +733,23 @@ class InstallerModel:
             )
         )
 
-        if size_checked and size_matches == size_checked:
+        critical_expected = [name for name in expected if name in CRITICAL_GAME_FILES]
+        if critical_failures:
+            main = ComponentStatus(
+                False,
+                "주의",
+                f"Teamfight Manager 2 {target_version}용 설치 도구입니다. 핵심 게임 데이터 파일이 달라 Steam 업데이트/무결성 확인을 권장합니다.",
+            )
+        elif critical_expected and critical_matches == len(critical_expected):
+            if optional_mismatches:
+                main = ComponentStatus(
+                    True,
+                    "호환",
+                    f"Teamfight Manager 2 {target_version} 핵심 데이터 기준과 일치합니다. 실행 파일 빌드 차이는 허용했습니다.",
+                )
+            else:
+                main = ComponentStatus(True, "호환", f"Teamfight Manager 2 {target_version} 기준과 일치")
+        elif size_checked and size_matches == size_checked:
             main = ComponentStatus(True, "호환", f"Teamfight Manager 2 {target_version} 기준과 일치")
         elif size_checked:
             main = ComponentStatus(
