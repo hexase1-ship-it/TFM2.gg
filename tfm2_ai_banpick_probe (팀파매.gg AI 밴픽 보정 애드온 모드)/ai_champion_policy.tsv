@@ -1,6 +1,6 @@
 # AUTO_GENERATED_BY_TFM2_META_DASHBOARD
 # Do not hand-edit unless you intentionally want to override dashboard meta scoring.
-# Generated: 2026-06-06T01:20:25
+# Generated: 2026-06-06T16:26:00
 # Save: C:\Users\hexas\AppData\Roaming\TeamSamoyed\TeamfightManager2\data\save_20260606_010734.data
 # Source: overall patch 2026.0.0
 # Patch: 2026.0.0
@@ -19,12 +19,11 @@
 # OverallAnchors: {"A": 70.0, "B": 60.0, "C": 50.0, "D": 40.0, "S": 80.0}
 # NativeBiasFormula: clamp((overall - 50) / 20, -1.5, 1.5)
 # Format: champion_id<TAB>tier<TAB>overall<TAB>candidate_index
-# For No tier, overall is omitted so the native addon falls back to the tier column.
+# For No tier, overall is omitted and the native addon removes any existing team tier entry.
 # Non-eligible or low-sample champions are emitted as neutral C/50.0.
 # champion_id	tier	overall	candidate_index
-malphite	A	71.4	61
+malphite	A	71.4	63
 swordman	A	71.2	2
-test_mod_jhin	B	60.6	64
 gambler	B	60.5	21
 pythoness	B	60.4	6
 demon	B	60.4	23
@@ -34,7 +33,7 @@ android	C	50.0	48
 soldier	C	50.0	4
 shield_bearer	C	49.8	28
 pyromancer	C	49.8	8
-beast_valtan	C	49.8	60
+beast_valtan	C	49.8	62
 monk	C	49.7	7
 gunner	C	49.7	18
 circus_blade	C	49.7	59
@@ -47,20 +46,17 @@ illusionist	C	49.5	41
 fighter	C	49.2	0
 whip_master	C	49.2	29
 siege_breaker	C	49.1	47
-ice_mage	C	49.0	9
-guardian_spirit	C	48.9	57
-test_mod_vayne	D	38.8	65
+ice_mage	D	39.0	9
+guardian_spirit	D	38.9	57
 executioner	D	38.8	13
 lancer	D	38.7	14
-test_mod_aatrox	D	38.6	62
 white_mage	D	38.6	53
 ghost	D	38.5	40
-test_mod_fiddlesticks	D	38.1	63
 shadowmancer	D	37.9	45
 dancer	D	37.8	37
-squirrel	D	37.8	69
+squirrel	D	37.8	61
 wind_mage	D	37.6	54
-oni	D	37.5	68
+oni	D	37.5	60
 hitman	C	50.0	56
 vampire	C	50.0	24
 dark_mage	C	50.0	38
@@ -75,11 +71,9 @@ ogre	C	50.0	15
 plague_doctor	C	50.0	43
 exorcist	C	50.0	39
 priest	C	50.0	5
-test_mod_viktor	C	50.0	67
 boomerang_hunter	C	50.0	26
 voodoo_shaman	C	50.0	52
 pole_warrior	C	50.0	19
-test_mod_veigar	C	50.0	66
 lightning_mage	C	50.0	42
 magic_knight	C	50.0	11
 druid	C	50.0	49

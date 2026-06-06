@@ -1,6 +1,6 @@
 # AUTO_GENERATED_BY_TFM2_META_DASHBOARD
 # Do not hand-edit unless you intentionally want to override dashboard meta scoring.
-# Generated: 2026-06-06T01:20:25
+# Generated: 2026-06-06T16:26:00
 # Save: C:\Users\hexas\AppData\Roaming\TeamSamoyed\TeamfightManager2\data\save_20260606_010734.data
 # Source: tournament patch 2026.0.0
 # Patch: 2026.0.0
@@ -15,11 +15,11 @@
 # BaselinePresence: 38.0
 # PolicyKind: championTier
 # OverallSemantic: dashboard_meta_tier_for_in_game_sabcd_no
-# OverallNote: overall is an S/A/B/C/D anchor for the native tier addon; No leaves overall blank so the native addon uses the tier column.
+# OverallNote: overall is an S/A/B/C/D anchor for the native tier addon; No leaves overall blank and removes the champion from team tier maps.
 # OverallAnchors: {"A": 75.0, "B": 62.0, "C": 50.0, "D": 35.0, "S": 90.0}
 # NativeBiasFormula: -
 # Format: champion_id<TAB>tier<TAB>overall
-# For No tier, overall is omitted so the native addon falls back to the tier column.
+# For No tier, overall is omitted and the native addon removes any existing team tier entry.
 # Non-eligible or low-sample champions are emitted as No with blank overall.
 # champion_id	tier	overall
 shield_bearer	B	62.0
@@ -32,17 +32,17 @@ fighter	C	50.0
 beast_valtan	C	50.0
 white_mage	C	50.0
 soldier	C	50.0
-test_mod_jhin	C	50.0
 guardian_spirit	C	50.0
 siege_breaker	D	35.0
 hunter	D	35.0
 cavalry_knight	D	35.0
-test_mod_aatrox	D	35.0
 ghost	D	35.0
 ice_mage	D	35.0
 dancer	D	35.0
 executioner	D	35.0
 wind_mage	D	35.0
+test_mod_jhin	No
+test_mod_aatrox	No
 hitman	No
 vampire	No
 dark_mage	No

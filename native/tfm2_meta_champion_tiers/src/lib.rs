@@ -14,7 +14,6 @@ const POLICY_FILE_NAME: &str = "champion_tier_policy.tsv";
 
 static POLICY_CACHE: OnceLock<Mutex<PolicyCache>> = OnceLock::new();
 static LAST_APPLY: OnceLock<Mutex<Option<String>>> = OnceLock::new();
-static LAST_POLICY_APPLY: OnceLock<Mutex<Option<String>>> = OnceLock::new();
 static LAST_ERROR: OnceLock<Mutex<Option<String>>> = OnceLock::new();
 
 #[derive(Clone)]
@@ -37,14 +36,10 @@ struct MetaTierClient;
 struct MetaTierServer;
 
 impl ModExtension for MetaTierClient {
-    fn post_update(
-        &self,
-        scene: &mut Scene,
-        _ui: &mut GameUI,
-        _assets: &mut Assets,
-        _dt: f32,
-    ) {
-        let _ = catch_unwind(AssertUnwindSafe(|| apply_policy_to_scene(scene, "client_post_update")));
+    fn post_update(&self, scene: &mut Scene, _ui: &mut GameUI, _assets: &mut Assets, _dt: f32) {
+        let _ = catch_unwind(AssertUnwindSafe(|| {
+            apply_policy_to_scene(scene, "client_post_update")
+        }));
     }
 }
 
@@ -60,37 +55,37 @@ fn apply_policy_to_scene(scene: &mut Scene, source_label: &str) {
     let Ok(mut db) = data.db.try_borrow_mut() else {
         return;
     };
-    let db_addr = (&*db as *const _) as usize;
-    let apply_key = format!(
-        "{}:{:?}:{:?}:{}:{}:{db_addr:x}",
-        policy.source.display(),
-        policy.modified,
-        policy.size,
-        policy.rows.len(),
-        db.teams.len(),
-    );
-    if should_skip_policy_apply(&apply_key) {
-        return;
-    }
-
     let mut teams = 0usize;
     let mut changed = 0usize;
     let mut already_matched = 0usize;
+    let mut missing = 0usize;
+    let mut mismatched = 0usize;
+    let mut removed = 0usize;
     for team in db.teams.values_mut() {
         teams += 1;
         for (champion_id, desired) in &policy.rows {
             match desired {
                 Some(tier) => {
-                    if team.champion_tiers.get(champion_id) == Some(tier) {
-                        already_matched += 1;
-                    } else {
-                        team.champion_tiers.insert(champion_id.clone(), *tier);
-                        changed += 1;
+                    match team.champion_tiers.get(champion_id) {
+                        Some(current) if current == tier => {
+                            already_matched += 1;
+                        }
+                        Some(_) => {
+                            team.champion_tiers.insert(champion_id.clone(), *tier);
+                            changed += 1;
+                            mismatched += 1;
+                        }
+                        None => {
+                            team.champion_tiers.insert(champion_id.clone(), *tier);
+                            changed += 1;
+                            missing += 1;
+                        }
                     }
                 }
                 None => {
                     if team.champion_tiers.remove(champion_id).is_some() {
                         changed += 1;
+                        removed += 1;
                     } else {
                         already_matched += 1;
                     }
@@ -98,15 +93,14 @@ fn apply_policy_to_scene(scene: &mut Scene, source_label: &str) {
             }
         }
     }
-    remember_policy_apply(apply_key);
 
     let signature = format!(
-        "{source_label}:{:?}:{:?}:{changed}:{already_matched}",
+        "{source_label}:{:?}:{:?}:{teams}:{changed}:{already_matched}:{missing}:{mismatched}:{removed}",
         policy.modified, policy.size
     );
     if changed > 0 && remember_apply_signature(signature) {
         let line = format!(
-            "source={source_label} policy_file={} teams={teams} policy_rows={} changed={changed} already_matched={already_matched}",
+            "source={source_label} reason=missing_or_mismatch policy_file={} teams={teams} policy_rows={} changed={changed} already_matched={already_matched} missing={missing} mismatched={mismatched} removed={removed}",
             policy.source.display(),
             policy.rows.len(),
         );
@@ -126,9 +120,7 @@ fn load_policy() -> Option<TierPolicy> {
     let cache = POLICY_CACHE.get_or_init(|| Mutex::new(PolicyCache::default()));
 
     if let Ok(mut guard) = cache.lock() {
-        if guard.source.as_ref() == Some(&path)
-            && guard.modified == modified
-            && guard.size == size
+        if guard.source.as_ref() == Some(&path) && guard.modified == modified && guard.size == size
         {
             return guard.policy.clone();
         }
@@ -211,10 +203,9 @@ fn parse_tier(label: &str, overall: Option<&str>) -> Result<Option<ChampionTier>
         "B" | "2" => Ok(Some(ChampionTier::B)),
         "C" | "3" => Ok(Some(ChampionTier::C)),
         "D" | "4" => Ok(Some(ChampionTier::D)),
-        "NO" | "NO-TIER" | "NONE" | "-" => Ok(Some(ChampionTier::NoTier)),
+        "NO" | "NO-TIER" | "NONE" | "-" => Ok(None),
         "" => derive_tier_from_overall(overall),
-        other => derive_tier_from_overall(overall)
-            .map_err(|_| format!("unknown tier '{other}'")),
+        other => derive_tier_from_overall(overall).map_err(|_| format!("unknown tier '{other}'")),
     }
 }
 
@@ -354,27 +345,17 @@ fn remember_apply_signature(signature: String) -> bool {
     }
 }
 
-fn should_skip_policy_apply(key: &str) -> bool {
-    let slot = LAST_POLICY_APPLY.get_or_init(|| Mutex::new(None));
-    if let Ok(guard) = slot.lock() {
-        return guard.as_deref() == Some(key);
-    }
-    false
-}
-
-fn remember_policy_apply(key: String) {
-    let slot = LAST_POLICY_APPLY.get_or_init(|| Mutex::new(None));
-    if let Ok(mut guard) = slot.lock() {
-        *guard = Some(key);
-    }
-}
-
 fn write_latest_snapshot(policy: &TierPolicy, summary: &str) {
     let path = mod_dir().join("tier-policy-latest.txt");
     if let Some(parent) = path.parent() {
         let _ = fs::create_dir_all(parent);
     }
-    if let Ok(mut file) = OpenOptions::new().create(true).write(true).truncate(true).open(path) {
+    if let Ok(mut file) = OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(true)
+        .open(path)
+    {
         let _ = writeln!(file, "{summary}");
         let _ = writeln!(file, "source={}", policy.source.display());
         for (champion, tier) in &policy.rows {

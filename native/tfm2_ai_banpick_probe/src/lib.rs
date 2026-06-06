@@ -10,6 +10,7 @@ use mod_api::*;
 
 const MOD_ID: &str = "tfm2_ai_banpick_probe";
 const POLICY_FILE_NAME: &str = "ai_champion_policy.tsv";
+const CANDIDATE_MAP_FILE_NAME: &str = "candidate_map.tsv";
 const DEFAULT_LOG_LIMIT: usize = 240;
 
 static POLICY_CACHE: OnceLock<Mutex<PolicyCache>> = OnceLock::new();
@@ -25,6 +26,7 @@ struct AiPolicyRow {
     champion_id: String,
     tier: String,
     overall: f32,
+    is_external: bool,
 }
 
 #[derive(Clone)]
@@ -41,6 +43,9 @@ struct AiPolicy {
     source: PathBuf,
     rows_by_candidate: Vec<Option<AiPolicyRow>>,
     config: AiConfig,
+    expected_runtime_count: Option<usize>,
+    external_row_count: usize,
+    map_status: String,
 }
 
 #[derive(Default)]
@@ -48,7 +53,25 @@ struct PolicyCache {
     source: Option<PathBuf>,
     modified: Option<SystemTime>,
     size: Option<u64>,
+    map_source: Option<PathBuf>,
+    map_modified: Option<SystemTime>,
+    map_size: Option<u64>,
     policy: Option<AiPolicy>,
+}
+
+#[derive(Clone)]
+struct CandidateMapRow {
+    champion_id: String,
+    is_external: bool,
+}
+
+#[derive(Clone)]
+struct CandidateMap {
+    source: PathBuf,
+    rows_by_candidate: Vec<Option<CandidateMapRow>>,
+    expected_runtime_count: Option<usize>,
+    active_external_count: usize,
+    base_valid: bool,
 }
 
 impl Default for AiConfig {
@@ -106,6 +129,12 @@ fn score_candidate(
     else {
         return DraftScoreDecision::Pass;
     };
+    if row.is_external {
+        let runtime_count = ctx.available_champions.len();
+        if policy.expected_runtime_count != Some(runtime_count) {
+            return DraftScoreDecision::Pass;
+        }
+    }
 
     let divisor = if policy.config.overall_divisor.abs() < 0.001 {
         20.0
@@ -132,19 +161,41 @@ fn load_policy() -> Option<AiPolicy> {
     let metadata = fs::metadata(&path).ok();
     let modified = metadata.as_ref().and_then(|meta| meta.modified().ok());
     let size = metadata.as_ref().map(|meta| meta.len());
+    let map_path = find_candidate_map_file(&config, &path);
+    let map_metadata = map_path.as_ref().and_then(|path| fs::metadata(path).ok());
+    let map_modified = map_metadata.as_ref().and_then(|meta| meta.modified().ok());
+    let map_size = map_metadata.as_ref().map(|meta| meta.len());
     let cache = POLICY_CACHE.get_or_init(|| Mutex::new(PolicyCache::default()));
 
     if let Ok(mut guard) = cache.lock() {
         if guard.source.as_ref() == Some(&path)
             && guard.modified == modified
             && guard.size == size
+            && guard.map_source == map_path
+            && guard.map_modified == map_modified
+            && guard.map_size == map_size
         {
             return guard.policy.clone();
         }
 
+        let candidate_map = map_path
+            .as_ref()
+            .and_then(|path| match fs::read_to_string(path) {
+                Ok(text) => match parse_candidate_map(&text, path.clone()) {
+                    Ok(map) => Some(map),
+                    Err(err) => {
+                        log_error_once(format!("candidate_map: parse failed {}: {err}", path.display()));
+                        None
+                    }
+                },
+                Err(err) => {
+                    log_error_once(format!("candidate_map: read failed {}: {err}", path.display()));
+                    None
+                }
+            });
         let policy_result = fs::read_to_string(&path)
             .map_err(|err| err.to_string())
-            .and_then(|text| parse_policy(&text, path.clone(), ai_config(&config)));
+            .and_then(|text| parse_policy(&text, path.clone(), ai_config(&config), candidate_map));
         match policy_result {
             Ok(policy) => {
                 let row_count = policy
@@ -153,12 +204,18 @@ fn load_policy() -> Option<AiPolicy> {
                     .filter(|entry| entry.is_some())
                     .count();
                 log_line(&format!(
-                    "policy: loaded {row_count} AI champion rows from {}",
-                    policy.source.display()
+                    "policy: loaded {row_count} AI champion rows from {} custom_rows={} expected_runtime={:?} map={}",
+                    policy.source.display(),
+                    policy.external_row_count,
+                    policy.expected_runtime_count,
+                    policy.map_status
                 ));
                 guard.source = Some(path);
                 guard.modified = modified;
                 guard.size = size;
+                guard.map_source = map_path;
+                guard.map_modified = map_modified;
+                guard.map_size = map_size;
                 guard.policy = Some(policy.clone());
                 clear_last_error();
                 Some(policy)
@@ -168,6 +225,9 @@ fn load_policy() -> Option<AiPolicy> {
                 guard.source = Some(path);
                 guard.modified = modified;
                 guard.size = size;
+                guard.map_source = map_path;
+                guard.map_modified = map_modified;
+                guard.map_size = map_size;
                 guard.policy = None;
                 None
             }
@@ -181,8 +241,21 @@ fn parse_policy(
     text: &str,
     source: PathBuf,
     config: AiConfig,
+    candidate_map: Option<CandidateMap>,
 ) -> Result<AiPolicy, String> {
     let mut rows_by_candidate: Vec<Option<AiPolicyRow>> = Vec::new();
+    let map_status = candidate_map
+        .as_ref()
+        .map(|map| {
+            format!(
+                "{} active_external={} base_valid={}",
+                map.source.display(),
+                map.active_external_count,
+                map.base_valid
+            )
+        })
+        .unwrap_or_else(|| "missing_custom_disabled".to_string());
+    let mut external_row_count = 0usize;
     for (line_number, raw_line) in text.lines().enumerate() {
         let line = raw_line.trim();
         if line.is_empty() || line.starts_with('#') {
@@ -196,25 +269,43 @@ fn parse_policy(
             continue;
         }
         let champion_id = columns[0].trim();
+        let canonical_index = canonical_candidate_index(champion_id);
         let tier = columns[1].trim();
         let overall = columns[2]
             .trim()
             .parse::<f32>()
             .map_err(|err| format!("line {}: invalid overall: {err}", line_number + 1))?;
-        let candidate_index = columns
+        let explicit_index = columns
             .get(3)
-            .and_then(|value| value.trim().parse::<usize>().ok())
-            .or_else(|| canonical_candidate_index(champion_id));
+            .and_then(|value| value.trim().parse::<usize>().ok());
+        let candidate_index = if let Some(index) = canonical_index {
+            Some(index)
+        } else {
+            explicit_index.filter(|index| {
+                candidate_map
+                    .as_ref()
+                    .filter(|map| map.base_valid && map.expected_runtime_count.is_some())
+                    .and_then(|map| map.rows_by_candidate.get(*index))
+                    .and_then(|row| row.as_ref())
+                    .map(|row| row.is_external && row.champion_id == champion_id)
+                    .unwrap_or(false)
+            })
+        };
         let Some(candidate_index) = candidate_index else {
             continue;
         };
+        let is_external = canonical_index.is_none();
         if rows_by_candidate.len() <= candidate_index {
             rows_by_candidate.resize(candidate_index + 1, None);
+        }
+        if is_external {
+            external_row_count += 1;
         }
         rows_by_candidate[candidate_index] = Some(AiPolicyRow {
             champion_id: champion_id.to_string(),
             tier: tier.to_string(),
             overall,
+            is_external,
         });
     }
 
@@ -226,6 +317,87 @@ fn parse_policy(
         source,
         rows_by_candidate,
         config,
+        expected_runtime_count: if external_row_count > 0 {
+            candidate_map.and_then(|map| map.expected_runtime_count)
+        } else {
+            None
+        },
+        external_row_count,
+        map_status,
+    })
+}
+
+fn parse_candidate_map(text: &str, source: PathBuf) -> Result<CandidateMap, String> {
+    let mut rows_by_candidate: Vec<Option<CandidateMapRow>> = Vec::new();
+    let mut expected_runtime_count = None;
+    let mut active_external_count = 0usize;
+    let mut base_valid_count = 0usize;
+
+    for raw_line in text.lines() {
+        let line = raw_line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        if let Some(value) = line.strip_prefix("# ExpectedRuntimeChampionCount:") {
+            expected_runtime_count = value.trim().parse::<usize>().ok();
+            continue;
+        }
+        if line.starts_with('#') {
+            continue;
+        }
+        let columns: Vec<&str> = line.split('\t').collect();
+        if columns.len() < 4 {
+            continue;
+        }
+        if columns[0].eq_ignore_ascii_case("candidate_index") {
+            continue;
+        }
+        let Ok(candidate_index) = columns[0].trim().parse::<usize>() else {
+            continue;
+        };
+        let champion_id = columns[1].trim();
+        let source_kind = columns[2].trim();
+        let status = columns[3].trim();
+        if champion_id.is_empty() {
+            continue;
+        }
+
+        let is_base = source_kind == "base" && status == "verified_base";
+        let is_external = source_kind == "active_external" && status == "conditional_external";
+        if is_base {
+            let expected = CANONICAL_CHAMPIONS.get(candidate_index).copied();
+            if expected != Some(champion_id) {
+                continue;
+            }
+            base_valid_count += 1;
+        } else if is_external {
+            if candidate_index < CANONICAL_CHAMPIONS.len() {
+                continue;
+            }
+            active_external_count += 1;
+        } else {
+            continue;
+        }
+
+        if rows_by_candidate.len() <= candidate_index {
+            rows_by_candidate.resize(candidate_index + 1, None);
+        }
+        rows_by_candidate[candidate_index] = Some(CandidateMapRow {
+            champion_id: champion_id.to_string(),
+            is_external,
+        });
+    }
+
+    if expected_runtime_count.is_none() {
+        expected_runtime_count = Some(rows_by_candidate.len());
+    }
+
+    Ok(CandidateMap {
+        source,
+        rows_by_candidate,
+        expected_runtime_count,
+        active_external_count,
+        base_valid: base_valid_count == CANONICAL_CHAMPIONS.len(),
     })
 }
 
@@ -237,7 +409,10 @@ fn canonical_candidate_index(champion_id: &str) -> Option<usize> {
 
 fn read_all_config() -> HashMap<String, String> {
     let mut result = HashMap::new();
-    for path in [mod_dir().join("config.ini"), mod_dir().join("ai_banpick_config.ini")] {
+    for path in [
+        mod_dir().join("config.ini"),
+        mod_dir().join("ai_banpick_config.ini"),
+    ] {
         for (key, value) in read_config(&path) {
             result.insert(key, value);
         }
@@ -332,6 +507,27 @@ fn find_policy_file(config: &HashMap<String, String>) -> Option<PathBuf> {
     candidates.into_iter().find(|path| path.is_file())
 }
 
+fn find_candidate_map_file(config: &HashMap<String, String>, policy_path: &Path) -> Option<PathBuf> {
+    let mod_dir = mod_dir();
+    let map_file = config
+        .get("candidate_map_file")
+        .cloned()
+        .unwrap_or_else(|| CANDIDATE_MAP_FILE_NAME.to_string());
+
+    let mut candidates = Vec::new();
+    if let Some(path) = config.get("candidate_map_path") {
+        candidates.push(PathBuf::from(path));
+    }
+    if let Some(dir) = config.get("candidate_map_dir") {
+        candidates.push(PathBuf::from(dir).join(&map_file));
+    }
+    if let Some(parent) = policy_path.parent() {
+        candidates.push(parent.join(&map_file));
+    }
+    candidates.push(mod_dir.join(&map_file));
+    candidates.into_iter().find(|path| path.is_file())
+}
+
 fn log_hook(
     phase: &str,
     candidate: usize,
@@ -348,7 +544,12 @@ fn log_hook(
         return;
     }
     if HOOK_LOG_REMAINING
-        .compare_exchange(remaining, remaining - 1, Ordering::Relaxed, Ordering::Relaxed)
+        .compare_exchange(
+            remaining,
+            remaining - 1,
+            Ordering::Relaxed,
+            Ordering::Relaxed,
+        )
         .is_err()
     {
         return;

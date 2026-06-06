@@ -32,7 +32,7 @@ RELEASE_PAGE_URL = f"https://github.com/{REPO_FULL_NAME}/releases/tag/latest"
 DIRECT_DOWNLOAD_URL = f"https://github.com/{REPO_FULL_NAME}/releases/download/latest/{RELEASE_ASSET_NAME}"
 TARGET_GAME_VERSION = "0.4.10"
 STEAM_APP_ID = "3009300"
-PACKAGE_LAYOUT_VERSION = 3
+PACKAGE_LAYOUT_VERSION = 4
 DASHBOARD_INSTALL_DIR_NAME = APP_NAME
 DASHBOARD_EXE_NAME = "TFM2MetaDashboard.exe"
 DASHBOARD_SHELL_DEFAULT_ITEMS = (
@@ -137,6 +137,7 @@ ADDON_PACKAGES = (
             ("overall_divisor", "20"),
             ("min_bias", "-1.5"),
             ("max_bias", "1.5"),
+            ("candidate_map_file", "candidate_map.tsv"),
         ),
     ),
 )
@@ -170,6 +171,11 @@ def user_state_dir() -> Path:
     path = Path(root) / APP_NAME
     path.mkdir(parents=True, exist_ok=True)
     return path
+
+
+def safe_file_component(text: str) -> str:
+    cleaned = re.sub(r"[^A-Za-z0-9._-]+", "_", str(text or "").strip())
+    return cleaned.strip("._") or "unknown"
 
 
 def local_update_dir() -> Path:
@@ -310,6 +316,43 @@ def summarize_ai_policy(path: Path) -> str:
     negative = sum(1 for bias in biases if bias < -0.05)
     neutral = len(biases) - positive - negative
     return f"{len(rows)}행 +{positive}/0{neutral}/-{negative} ({min(biases):+.2f}~{max(biases):+.2f})"
+
+
+def summarize_candidate_map(path: Path) -> str:
+    if not path.exists():
+        return "커스텀 AI: 비활성"
+    try:
+        lines = path.read_text(encoding="utf-8-sig", errors="replace").splitlines()
+    except OSError:
+        return "커스텀 AI: 맵 읽기 실패"
+    expected = None
+    base = 0
+    external = 0
+    rejected = 0
+    for line in lines:
+        text = line.strip()
+        if not text:
+            continue
+        if text.startswith("# ExpectedRuntimeChampionCount:"):
+            expected = text.split(":", 1)[1].strip()
+            continue
+        if text.startswith("#"):
+            continue
+        parts = text.split("\t")
+        if len(parts) < 4 or parts[0].lower() == "candidate_index":
+            continue
+        source = parts[2].strip()
+        status = parts[3].strip()
+        if source == "base" and status == "verified_base":
+            base += 1
+        elif source == "active_external" and status == "conditional_external":
+            external += 1
+        else:
+            rejected += 1
+    if external <= 0:
+        return f"커스텀 AI: 비활성 (기본 {base})"
+    suffix = f", 거부 {rejected}" if rejected else ""
+    return f"커스텀 AI: 조건부 {external}명 / 예상 {expected or '-'}명 (기본 {base}{suffix})"
 
 
 def copy_tree_contents(src: Path, dst: Path) -> None:
@@ -749,6 +792,62 @@ class InstallerModel:
     def champion_view_compat_dir(self, game_dir: Path) -> Path:
         return game_dir / "mods" / CHAMPION_VIEW_COMPAT_MOD_ID
 
+    def workshop_override_backup_dir(self, row: WorkshopChampionMod, create: bool = False) -> Path:
+        path = (
+            user_state_dir()
+            / "workshop_override_backups"
+            / STEAM_APP_ID
+            / safe_file_component(row.workshop_id)
+            / safe_file_component(row.mod_id)
+        )
+        if create:
+            path.mkdir(parents=True, exist_ok=True)
+        return path
+
+    def workshop_override_backup_path(self, row: WorkshopChampionMod, kind: str, stamp: str) -> Path:
+        folder = self.workshop_override_backup_dir(row, create=True)
+        return folder / f"mod.override_info.tfm2gg_{safe_file_component(kind)}_override_backup_{stamp}"
+
+    def workshop_override_backup_files(self, row: WorkshopChampionMod, kind: str) -> list[Path]:
+        folder = self.workshop_override_backup_dir(row)
+        if not folder.exists():
+            return []
+        patterns = {
+            "view": [
+                "mod.override_info.tfm2gg_view_override_backup_*",
+                "mod.override_info.tfm2gg_override_backup_*",
+            ],
+            "text": [
+                "mod.override_info.tfm2gg_text_override_backup_*",
+            ],
+        }.get(kind, [])
+        out: list[Path] = []
+        for pattern in patterns:
+            out.extend(sorted(folder.glob(pattern)))
+        return sorted(set(out))
+
+    def workshop_root_override_backup_files(self, row: WorkshopChampionMod) -> list[Path]:
+        patterns = [
+            "mod.override_info.tfm2gg_*backup*",
+            "mod.override_info.tfm2gg_*restore_backup*",
+        ]
+        out: list[Path] = []
+        for pattern in patterns:
+            out.extend(path for path in sorted(row.path.glob(pattern)) if path.is_file())
+        return sorted(set(out))
+
+    def migrate_workshop_override_backups(self, game_dir: Path) -> list[str]:
+        moved: list[str] = []
+        for row in self.discover_workshop_champion_mods(game_dir):
+            backup_dir = self.workshop_override_backup_dir(row, create=True)
+            for source in self.workshop_root_override_backup_files(row):
+                target = backup_dir / source.name
+                if target.exists():
+                    target = backup_dir / f"{source.name}.{int(source.stat().st_mtime)}"
+                shutil.move(str(source), str(target))
+                moved.append(str(source))
+        return moved
+
     def build_champion_view_compat_plan(self, game_dir: Path) -> dict:
         config = self.read_mods_config(game_dir)
         enabled_order = [str(item) for item in config.get("enabled_mods", []) if str(item) != CHAMPION_VIEW_COMPAT_MOD_ID]
@@ -763,31 +862,42 @@ class InstallerModel:
         for row in active:
             active_champion_ids.update(row.champion_ids)
 
-        text_payload: dict = {}
         text_ids: set[str] = set()
         sources: dict[str, str] = {}
         style_override_mods: list[str] = []
         style_merge_mods: list[str] = []
+        style_patched_mods: list[str] = []
         text_override_mods: list[str] = []
         text_patched_mods: list[str] = []
+        backup_residue_mods: list[str] = []
         missing_text_ids: list[str] = []
 
         for row in active:
+            if self.workshop_root_override_backup_files(row):
+                backup_residue_mods.append(row.mod_id)
             merge_type = self.mod_champion_view_merge_type(row.path)
             if merge_type == "override":
                 style_override_mods.append(row.mod_id)
             elif merge_type == "merge":
                 style_merge_mods.append(row.mod_id)
+                if self.workshop_override_backup_files(row, "view"):
+                    style_patched_mods.append(row.mod_id)
 
             text_type = str(self.mod_override_row(row.path, CHAMPION_TEXT_ASSET_KEY).get("type") or "").strip().lower()
             if text_type == "override":
                 text_override_mods.append(row.mod_id)
-            elif text_type == "merge" and list(row.path.glob("mod.override_info.tfm2gg_text_override_backup_*")):
+            elif text_type == "merge" and self.workshop_override_backup_files(row, "text"):
                 text_patched_mods.append(row.mod_id)
 
             champion_ids = set(row.champion_ids)
             text = self.load_champion_text_payload(row.path)
-            added = self.merge_champion_text_payload(text_payload, text, champion_ids)
+            added: set[str] = set()
+            if isinstance(text, dict):
+                for champion_id in champion_ids:
+                    if champion_id in text:
+                        added.add(champion_id)
+                    elif isinstance(text.get("data"), dict) and champion_id in text["data"]:
+                        added.add(champion_id)
             text_ids.update(added)
             for champion_id in added:
                 sources[champion_id] = row.mod_id
@@ -801,33 +911,37 @@ class InstallerModel:
             "activeMods": [row.mod_id for row in active],
             "activeChampionCount": len(active_champion_ids),
             "generatedIds": generated_ids,
-            "textPayload": text_payload,
+            "textPayload": {},
             "sources": sources,
             "overrideMods": style_override_mods,
             "mergeMods": style_merge_mods,
+            "viewPatchedMods": sorted(set(style_patched_mods)),
             "textOverrideMods": text_override_mods,
             "textPatchedMods": sorted(set(text_patched_mods)),
+            "backupResidueMods": sorted(set(backup_residue_mods)),
             "missingAfterOrder": [],
             "missingStyleIds": [],
             "missingTextIds": sorted(set(missing_text_ids)),
             "conflictRisk": bool(style_override_mods),
-            "shouldInstall": bool(text_override_mods or compat_dir.exists() or compat_enabled),
-            "installed": bool(text_patched_mods and not compat_dir.exists() and not compat_enabled),
+            "shouldInstall": bool(style_override_mods or text_override_mods or backup_residue_mods or compat_dir.exists() or compat_enabled),
+            "installed": bool((style_patched_mods or text_patched_mods) and not style_override_mods and not text_override_mods and not backup_residue_mods),
             "enabled": compat_enabled,
             "loadLast": bool(config_enabled and config_enabled[-1] == CHAMPION_VIEW_COMPAT_MOD_ID),
         }
 
     def format_champion_view_compat_summary(self, plan: dict) -> str:
-        text_patched_count = len(plan.get("textPatchedMods") or [])
-        override_count = len(plan.get("overrideMods") or [])
+        view_override_count = len(plan.get("overrideMods") or [])
         text_override_count = len(plan.get("textOverrideMods") or [])
-        if plan.get("installed"):
-            return f"text override fixed {text_patched_count} / no compat mod / style untouched"
-        if plan.get("shouldInstall"):
-            return f"text override pending {text_override_count} / no compat mod / style override warning {override_count}"
-        if text_patched_count:
-            return f"text override fixed {text_patched_count} / no compat mod / style untouched"
-        return "none"
+        view_patched_count = len(plan.get("viewPatchedMods") or [])
+        text_patched_count = len(plan.get("textPatchedMods") or [])
+        residue_count = len(plan.get("backupResidueMods") or [])
+        if residue_count:
+            return f"backup residue cleanup needed: {residue_count} mods"
+        if view_override_count or text_override_count:
+            return f"merge patch needed: view {view_override_count} / text {text_override_count}"
+        if view_patched_count or text_patched_count:
+            return f"workshop merge patch applied: view {view_patched_count} / text {text_patched_count}"
+        return "clean / no merge patch"
 
     def restore_champion_view_override_backups(self, game_dir: Path) -> list[str]:
         records: list[dict] = []
@@ -838,10 +952,7 @@ class InstallerModel:
 
         for row in self.discover_workshop_champion_mods(game_dir):
             override_path = row.path / "mod.override_info"
-            try:
-                backups = sorted(row.path.glob("mod.override_info.tfm2gg_override_backup_*"))
-            except OSError:
-                backups = []
+            backups = self.workshop_override_backup_files(row, "view")
             for backup_path in backups:
                 records.append({"path": str(override_path), "backupPath": str(backup_path), "modId": row.mod_id})
 
@@ -868,9 +979,19 @@ class InstallerModel:
                 continue
             if str(backup_entry.get("type") or "").strip().lower() != "override":
                 continue
-            if current_entry == backup_entry:
+            current_type = str(current_entry.get("type") or "").strip().lower()
+            backup_remapping = str(backup_entry.get("remapping") or "")
+            current_remapping = str(current_entry.get("remapping") or "")
+            if current_type == "override" and (not backup_remapping or backup_remapping == current_remapping):
                 continue
-            shutil.copy2(backup_path, path)
+
+            stamp = time.strftime("%Y%m%d_%H%M%S")
+            snapshot_dir = user_state_dir() / "workshop_override_backups" / "restore_snapshots"
+            snapshot_dir.mkdir(parents=True, exist_ok=True)
+            current_backup = snapshot_dir / f"{stamp}_{safe_file_component(str(record.get('modId') or path.parent.name))}_view_current_mod.override_info"
+            if not current_backup.exists():
+                shutil.copy2(path, current_backup)
+            replace_json_asset_type_preserving_format(path, CHAMPION_VIEW_ASSET_KEY, current_type or "merge", "override")
             restored.append(str(record.get("modId") or path.parent.name))
         return sorted(set(restored))
 
@@ -892,11 +1013,43 @@ class InstallerModel:
                 continue
             if str(entry.get("type") or "").strip().lower() != "override":
                 continue
-            backups = sorted(row.path.glob("mod.override_info.tfm2gg_text_override_backup_*"))
-            backup_path = backups[0] if backups else override_path.with_name(f"{override_path.name}.tfm2gg_text_override_backup_{stamp}")
+            backups = self.workshop_override_backup_files(row, "text")
+            backup_path = backups[0] if backups else self.workshop_override_backup_path(row, "text", stamp)
             if not backup_path.exists():
                 shutil.copy2(override_path, backup_path)
             replace_json_asset_type_preserving_format(override_path, CHAMPION_TEXT_ASSET_KEY, "override", "merge")
+            patched.append(row.mod_id)
+            records.append({
+                "modId": row.mod_id,
+                "workshopId": row.workshop_id,
+                "path": str(override_path),
+                "backupPath": str(backup_path),
+            })
+        return sorted(set(patched)), records
+
+    def patch_champion_view_overrides(self, game_dir: Path) -> tuple[list[str], list[dict]]:
+        patched: list[str] = []
+        records: list[dict] = []
+        stamp = time.strftime("%Y%m%d_%H%M%S")
+        config = self.read_mods_config(game_dir)
+        enabled = set(map(str, config.get("enabled_mods", [])))
+        for row in self.discover_workshop_champion_mods(game_dir):
+            if not row.enabled or row.mod_id not in enabled:
+                continue
+            override_path = row.path / "mod.override_info"
+            override_info = read_json(override_path, {})
+            if not isinstance(override_info, dict):
+                continue
+            entry = override_info.get(CHAMPION_VIEW_ASSET_KEY)
+            if not isinstance(entry, dict):
+                continue
+            if str(entry.get("type") or "").strip().lower() != "override":
+                continue
+            backups = self.workshop_override_backup_files(row, "view")
+            backup_path = backups[0] if backups else self.workshop_override_backup_path(row, "view", stamp)
+            if not backup_path.exists():
+                shutil.copy2(override_path, backup_path)
+            replace_json_asset_type_preserving_format(override_path, CHAMPION_VIEW_ASSET_KEY, "override", "merge")
             patched.append(row.mod_id)
             records.append({
                 "modId": row.mod_id,
@@ -915,10 +1068,7 @@ class InstallerModel:
 
         for row in self.discover_workshop_champion_mods(game_dir):
             override_path = row.path / "mod.override_info"
-            try:
-                backups = sorted(row.path.glob("mod.override_info.tfm2gg_text_override_backup_*"))
-            except OSError:
-                backups = []
+            backups = self.workshop_override_backup_files(row, "text")
             for backup_path in backups:
                 records.append({"path": str(override_path), "backupPath": str(backup_path), "modId": row.mod_id})
 
@@ -945,9 +1095,19 @@ class InstallerModel:
                 continue
             if str(backup_entry.get("type") or "").strip().lower() != "override":
                 continue
-            if current_entry == backup_entry:
+            current_type = str(current_entry.get("type") or "").strip().lower()
+            backup_remapping = str(backup_entry.get("remapping") or "")
+            current_remapping = str(current_entry.get("remapping") or "")
+            if current_type == "override" and (not backup_remapping or backup_remapping == current_remapping):
                 continue
-            shutil.copy2(backup_path, path)
+
+            stamp = time.strftime("%Y%m%d_%H%M%S")
+            snapshot_dir = user_state_dir() / "workshop_override_backups" / "restore_snapshots"
+            snapshot_dir.mkdir(parents=True, exist_ok=True)
+            current_backup = snapshot_dir / f"{stamp}_{safe_file_component(str(record.get('modId') or path.parent.name))}_text_current_mod.override_info"
+            if not current_backup.exists():
+                shutil.copy2(path, current_backup)
+            replace_json_asset_type_preserving_format(path, CHAMPION_TEXT_ASSET_KEY, current_type or "merge", "override")
             restored.append(str(record.get("modId") or path.parent.name))
         return sorted(set(restored))
 
@@ -962,7 +1122,8 @@ class InstallerModel:
         if self.is_game_running():
             raise RuntimeError("Teamfight Manager 2 is running. Close the game before changing champion mod compatibility files.")
 
-        restored_mods = self.restore_champion_view_override_backups(game_dir)
+        moved_backup_files = self.migrate_workshop_override_backups(game_dir)
+        patched_view_mods, view_backup_records = self.patch_champion_view_overrides(game_dir)
         patched_text_mods, text_backup_records = self.patch_champion_text_overrides(game_dir)
         compat_dir = self.champion_view_compat_dir(game_dir)
         if compat_dir.exists():
@@ -976,14 +1137,17 @@ class InstallerModel:
         self.write_mods_config(game_dir, config)
 
         updated = self.build_champion_view_compat_plan(game_dir)
-        updated["restoredChampionViewOverrides"] = restored_mods
+        updated["patchedChampionViewMods"] = patched_view_mods
         updated["patchedTextOverrideMods"] = patched_text_mods
+        updated["workshopViewOverrideBackups"] = view_backup_records
         updated["workshopTextOverrideBackups"] = text_backup_records
+        updated["movedWorkshopBackupFiles"] = moved_backup_files
         return updated
 
     def remove_champion_view_compat(self, game_dir: Path) -> None:
         if self.is_game_running():
             raise RuntimeError("Teamfight Manager 2 is running. Close the game before removing champion mod compatibility files.")
+        self.migrate_workshop_override_backups(game_dir)
         self.restore_champion_text_override_backups(game_dir)
         self.restore_champion_view_override_backups(game_dir)
         compat_dir = self.champion_view_compat_dir(game_dir)
@@ -1325,6 +1489,7 @@ class InstallerModel:
         policy_files = {
             "championTier": policy_dir / "champion_tier_policy.tsv",
             "aiChampion": policy_dir / "ai_champion_policy.tsv",
+            "aiCandidateMap": policy_dir / "candidate_map.tsv",
         }
         meta_tier_mod = game_dir / "mods" / META_TIER_MOD_ID
         ai_banpick_mod = game_dir / "mods" / AI_BANPICK_MOD_ID
@@ -1368,6 +1533,7 @@ class InstallerModel:
             "policyDetails": {
                 "championTier": summarize_champion_tier_policy(policy_files["championTier"]),
                 "aiChampion": summarize_ai_policy(policy_files["aiChampion"]),
+                "aiCandidateMap": summarize_candidate_map(policy_files["aiCandidateMap"]),
             },
             "addonLogs": addon_logs,
             "coreGeneratedAt": core_data.get("generatedAt") or "-",
@@ -1416,6 +1582,7 @@ class InstallerModel:
             dashboard_app / "tfm2_meta_dashboard" / "data" / "core-item-builds.json",
             policy_dir / "champion_tier_policy.tsv",
             policy_dir / "ai_champion_policy.tsv",
+            policy_dir / "candidate_map.tsv",
             game_dir / "mods" / MOD_ID / "tfm2_meta_item_delegate.dll",
         ]
 
@@ -1737,6 +1904,7 @@ Invoke-WebRequest -Uri $Url -OutFile $OutFile -Headers $headers -UseBasicParsing
             payload / "dashboard_app" / "tfm2_meta_dashboard",
             payload / "dashboard_app" / "tfm2_meta_dashboard" / "data" / "policy_exports" / "champion_tier_policy.tsv",
             payload / "dashboard_app" / "tfm2_meta_dashboard" / "data" / "policy_exports" / "ai_champion_policy.tsv",
+            payload / "dashboard_app" / "tfm2_meta_dashboard" / "data" / "policy_exports" / "candidate_map.tsv",
             *[payload / "mods" / addon.mod_id / addon.dll_name for addon in ADDON_PACKAGES],
             payload / "README.md",
         ]
@@ -2017,7 +2185,11 @@ class Tfm2InstallerApp(tk.Tk):
             label = addon_short_labels.get(addon.mod_id, addon.label)
             state = row["version"] if row["installed"] and row["version"] else ("설치됨" if row["installed"] else "없음")
             addon_lines.append(f"{label} {state}")
-        policy_ok = installed["policyFiles"].get("championTier") and installed["policyFiles"].get("aiChampion")
+        policy_ok = (
+            installed["policyFiles"].get("championTier")
+            and installed["policyFiles"].get("aiChampion")
+            and installed["policyFiles"].get("aiCandidateMap")
+        )
         meta_logs = installed["addonLogs"]["metaTier"]
         ai_logs = installed["addonLogs"]["aiBanpick"]
         shell_state = "설치됨" if installed["dashboardShellInstalled"] else "없음"
@@ -2029,6 +2201,7 @@ class Tfm2InstallerApp(tk.Tk):
             f"애드온: {' / '.join(addon_lines)}",
             f"메타 티어 TSV: {installed['policyDetails']['championTier']}",
             f"AI 보정 TSV: {installed['policyDetails']['aiChampion']}",
+            installed["policyDetails"]["aiCandidateMap"],
             f"정책 TSV: {'있음' if policy_ok else '없음'}",
             f"모드 로그: 티어 {'있음' if meta_logs['latest'] or meta_logs['debug'] else '대기'} / AI {'있음' if ai_logs['debug'] else '대기'}",
             f"메타 생성: {installed['coreGeneratedAt']}",
@@ -2262,7 +2435,7 @@ class Tfm2InstallerApp(tk.Tk):
                 game_dir = self.current_game_dir()
                 self.model.set_workshop_champion_mod_enabled(game_dir, row.mod_id, enabled)
                 compat_plan = self.model.sync_champion_view_compat(game_dir)
-                self.log(f"champion text compat: {self.model.format_champion_view_compat_summary(compat_plan)}")
+                self.log(f"champion mod cleanup: {self.model.format_champion_view_compat_summary(compat_plan)}")
                 self.log(f"챔피언 모드 {action}: {row.mod_id}")
                 refresh_tree()
                 self.refresh_status()
@@ -2274,24 +2447,24 @@ class Tfm2InstallerApp(tk.Tk):
             try:
                 plan = self.model.sync_champion_view_compat(self.current_game_dir(), force=True)
                 summary = self.model.format_champion_view_compat_summary(plan)
-                self.log(f"champion text compat rebuilt: {summary}")
+                self.log(f"champion mod cleanup rebuilt: {summary}")
                 refresh_tree()
                 self.refresh_status()
-                messagebox.showinfo("챔프 모드 호환 패치", f"호환 패치를 적용했습니다.\n{summary}")
+                messagebox.showinfo("챔프 모드 안정화", f"호환 패치 잔재 정리를 완료했습니다.\n{summary}")
             except Exception as exc:
-                messagebox.showerror("챔프 모드 호환 패치", str(exc))
+                messagebox.showerror("챔프 모드 안정화", str(exc))
 
         def remove_compat():
-            if not messagebox.askyesno("챔프 모드 호환 패치", "TFM2.gg가 생성한 text/champion 호환 패치 모드를 제거할까요?"):
+            if not messagebox.askyesno("챔프 모드 안정화", "TFM2.gg가 생성했던 호환 패치 잔재를 제거하고, 가능한 원본 override 상태로 되돌릴까요?"):
                 return
             try:
                 self.model.remove_champion_view_compat(self.current_game_dir())
-                self.log("champion text compat removed")
+                self.log("champion mod cleanup removed")
                 refresh_tree()
                 self.refresh_status()
-                messagebox.showinfo("챔프 모드 호환 패치", "호환 패치를 제거했습니다.")
+                messagebox.showinfo("챔프 모드 안정화", "호환 패치 잔재를 제거했습니다.")
             except Exception as exc:
-                messagebox.showerror("챔프 모드 호환 패치", str(exc))
+                messagebox.showerror("챔프 모드 안정화", str(exc))
 
         def open_folder():
             row = selected_row()
@@ -2300,8 +2473,8 @@ class Tfm2InstallerApp(tk.Tk):
 
         btns = ttk.Frame(frame)
         btns.grid(row=3, column=0, columnspan=2, sticky="ew", pady=(12, 0))
-        ttk.Button(btns, text="호환 패치 적용", style="Accent.TButton", command=rebuild_compat).pack(side="left", padx=(0, 8))
-        ttk.Button(btns, text="호환 패치 제거", command=remove_compat).pack(side="left", padx=(0, 8))
+        ttk.Button(btns, text="잔재 정리", style="Accent.TButton", command=rebuild_compat).pack(side="left", padx=(0, 8))
+        ttk.Button(btns, text="패치 제거", command=remove_compat).pack(side="left", padx=(0, 8))
         ttk.Button(btns, text="활성화", style="Primary.TButton", command=lambda: set_enabled(True)).pack(side="left")
         ttk.Button(btns, text="비활성화", style="Danger.TButton", command=lambda: set_enabled(False)).pack(side="left", padx=(8, 0))
         ttk.Button(btns, text="폴더 열기", command=open_folder).pack(side="left", padx=(8, 0))

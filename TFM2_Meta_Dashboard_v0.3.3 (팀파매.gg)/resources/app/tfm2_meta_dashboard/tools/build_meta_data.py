@@ -31,6 +31,9 @@ AI_CHAMPION_POLICY_MOD_OUT = ROOT / "mods" / "tfm2_ai_banpick_probe" / "ai_champ
 CHAMPION_TIER_POLICY_SOURCE_MOD_OUT = REPO_ROOT / "tfm2_meta_champion_tiers (팀파매.gg 메타 티어 동기화 애드온 모드)" / "champion_tier_policy.tsv"
 AI_CHAMPION_POLICY_SOURCE_MOD_OUT = REPO_ROOT / "tfm2_ai_banpick_probe (팀파매.gg AI 밴픽 보정 애드온 모드)" / "ai_champion_policy.tsv"
 BANPICK_DATA = DASHBOARD / "data" / "banpick-data.js"
+AI_CANDIDATE_MAP_OUT = POLICY_EXPORT_DIR / "candidate_map.tsv"
+AI_CANDIDATE_MAP_MOD_OUT = ROOT / "mods" / "tfm2_ai_banpick_probe" / "candidate_map.tsv"
+AI_CANDIDATE_MAP_SOURCE_MOD_OUT = REPO_ROOT / "tfm2_ai_banpick_probe (팀파매.gg AI 밴픽 보정 애드온 모드)" / "candidate_map.tsv"
 ITEM_SETTING_PATHS = [
     DASHBOARD / "data" / "item_setting.item_setting",
     ROOT / "mods" / "base_unpacked" / "setting" / "item_setting.item_setting",
@@ -788,6 +791,100 @@ def load_active_external_champions(champions, game_root=ROOT):
     return {"mods": loaded_mods, "championIds": added}
 
 
+def is_external_workshop_champion(champ):
+    source = champ.get("modSource") if isinstance(champ, dict) else None
+    return isinstance(source, dict) and source.get("type") == "workshop"
+
+
+def active_external_champion_ids(game_root=ROOT):
+    enabled_mod_ids = read_enabled_mod_ids(game_root)
+    workshop_mods = discover_workshop_champion_mods(game_root)
+    active_ids = []
+    for mod_id in enabled_mod_ids:
+        mod_meta = workshop_mods.get(mod_id)
+        if not mod_meta:
+            continue
+        for champion_file in mod_meta.get("championFiles") or []:
+            data = load_json_file(champion_file, {})
+            if not isinstance(data, dict):
+                continue
+            champion_id = str(data.get("id") or "").strip()
+            if champion_id:
+                active_ids.append(champion_id)
+    return active_ids
+
+
+def split_policy_champions_for_current_mods(champions, game_root=ROOT):
+    active_external_ids_ordered = active_external_champion_ids(game_root)
+    active_external = set(active_external_ids_ordered)
+    enabled_mod_ids = set(read_enabled_mod_ids(game_root))
+    workshop_mods = discover_workshop_champion_mods(game_root)
+    base_champions = []
+    external_by_id = {}
+    inactive_external_ids = set()
+    for champ in champions:
+        champion_id = str(champ.get("id") or "").strip()
+        if not champion_id:
+            continue
+        if is_external_workshop_champion(champ):
+            external_by_id[champion_id] = champ
+            if champion_id not in active_external:
+                inactive_external_ids.add(champion_id)
+        else:
+            base_champions.append(champ)
+
+    for mod_id, mod_meta in workshop_mods.items():
+        for champion_file in mod_meta.get("championFiles") or []:
+            data = load_json_file(champion_file, {})
+            if not isinstance(data, dict):
+                continue
+            champion_id = str(data.get("id") or "").strip()
+            if not champion_id or champion_id in external_by_id:
+                continue
+            external_by_id[champion_id] = {
+                "id": champion_id,
+                "name": champion_id,
+                "modSource": {
+                    "type": "workshop",
+                    "workshopId": mod_meta.get("workshopId"),
+                    "modId": mod_id,
+                    "modName": mod_meta.get("name"),
+                    "version": mod_meta.get("version"),
+                },
+            }
+            if mod_id not in enabled_mod_ids:
+                inactive_external_ids.add(champion_id)
+
+    active_external_champions = [
+        external_by_id[champion_id]
+        for champion_id in active_external_ids_ordered
+        if champion_id in external_by_id
+    ]
+    for champ in base_champions:
+        champion_id = str(champ.get("id") or "").strip()
+        if champion_id in BASE_CANDIDATE_INDEX:
+            champ["candidateIndex"] = BASE_CANDIDATE_INDEX[champion_id]
+    for offset, champ in enumerate(active_external_champions):
+        champ["candidateIndex"] = len(BASE_CANDIDATE_ORDER) + offset
+    inactive_external_champions = [
+        champ
+        for champion_id, champ in external_by_id.items()
+        if champion_id in inactive_external_ids
+    ]
+    champion_tier_champions = base_champions + active_external_champions + inactive_external_champions
+
+    ai_champions = base_champions + active_external_champions
+
+    return {
+        "championTierChampions": champion_tier_champions,
+        "aiChampions": ai_champions,
+        "activeExternalIds": active_external,
+        "inactiveExternalIds": inactive_external_ids,
+        "activeExternalCount": len(active_external_champions),
+        "inactiveExternalCount": len(inactive_external_champions),
+    }
+
+
 def resolve_policy_preset():
     env_preset = os.environ.get("TFM2_POLICY_PRESET")
     if env_preset:
@@ -1483,7 +1580,19 @@ def select_policy_stats(default_stats, stats_by_patch, patch_versions, scope="ov
     return default_stats, "all", f"{scope} all patches"
 
 
-def build_policy_exports(champions, stats, generated_at, save_path, patch_key, source_label, replay_date_status, score_model_spec, scope="overall"):
+def build_policy_exports(
+    champions,
+    stats,
+    generated_at,
+    save_path,
+    patch_key,
+    source_label,
+    replay_date_status,
+    score_model_spec,
+    scope="overall",
+    cleanup_champion_ids=None,
+):
+    cleanup_champion_ids = set(cleanup_champion_ids or [])
     legacy_preset = policy_preset()
     preset_id = legacy_preset["label"]
     _resolved_preset, preset_source = resolve_policy_preset()
@@ -1496,6 +1605,13 @@ def build_policy_exports(champions, stats, generated_at, save_path, patch_key, s
         champion_id = champ["id"]
         stat = stats.get(champion_id, {})
         info = score_model_entry(stat, sample_info, preset_id, score_model_spec, context)
+        if champion_id in cleanup_champion_ids:
+            info = {
+                **info,
+                "eligible": False,
+                "tier": "-",
+                "reason": "inactive_external_champion_mod",
+            }
         entry = {
             "championId": champion_id,
             "championName": champ.get("name") or champion_id,
@@ -1526,20 +1642,21 @@ def build_policy_exports(champions, stats, generated_at, save_path, patch_key, s
 
     rows = []
     for entry in entries:
-        policy_tier = entry["policyTier"]
+        cleanup_row = entry["championId"] in cleanup_champion_ids
+        policy_tier = "No" if cleanup_row else entry["policyTier"]
         tier_overall = tier_policy_overall(policy_tier, entry["eligible"])
-        ai_overall = ai_policy_overall(entry)
+        ai_overall = 50.0 if cleanup_row else ai_policy_overall(entry)
         rows.append(
             {
                 "championId": entry["championId"],
                 "championName": entry["championName"],
                 "candidateIndex": entry.get("candidateIndex"),
                 "tier": policy_tier,
-                "aiTier": policy_tier if entry["eligible"] else "C",
+                "aiTier": policy_tier if entry["eligible"] and not cleanup_row else "C",
                 "tierOverall": round1(tier_overall) if tier_overall is not None else None,
                 "aiOverall": round1(ai_overall),
                 "rawOverall": round1(entry["policyOverall"] if entry["eligible"] else 50.0),
-                "eligible": entry["eligible"],
+                "eligible": entry["eligible"] and not cleanup_row,
                 "metaTier": entry.get("tier") or "-",
                 "score": entry.get("score"),
                 "metaLower": entry.get("metaLower"),
@@ -1549,7 +1666,7 @@ def build_policy_exports(champions, stats, generated_at, save_path, patch_key, s
                 "reliability": entry.get("reliability"),
                 "pickCount": entry.get("pickCount"),
                 "winRate": entry.get("winRate"),
-                "reason": entry.get("reason"),
+                "reason": "inactive_external_champion_mod_cleanup" if cleanup_row else entry.get("reason"),
             }
         )
     rows.sort(
@@ -1587,13 +1704,14 @@ def build_policy_exports(champions, stats, generated_at, save_path, patch_key, s
         "baselinePresence": round1((context.get("exposure", {}).get("presence") or 0) * 100),
         "eligibleCount": len(eligible),
         "rowCount": len(rows),
+        "cleanupRowCount": len(cleanup_champion_ids),
         "policyProfiles": {
             "championTier": {
                 "tierField": "tier",
                 "overallField": "tierOverall",
                 "semantic": "dashboard_meta_tier_for_in_game_sabcd_no",
                 "anchors": TIER_POLICY_OVERALL_ANCHORS,
-                "note": "overall is an S/A/B/C/D anchor for the native tier addon; No leaves overall blank so the native addon uses the tier column.",
+                "note": "overall is an S/A/B/C/D anchor for the native tier addon; No leaves overall blank and removes the champion from team tier maps.",
             },
             "aiChampion": {
                 "tierField": "aiTier",
@@ -1653,7 +1771,7 @@ def render_policy_tsv(policy, profile_key):
         f"# OverallAnchors: {json.dumps(profile.get('anchors') or {}, sort_keys=True, ensure_ascii=False)}",
         f"# NativeBiasFormula: {native_bias_formula}",
         format_line,
-        "# For No tier, overall is omitted so the native addon falls back to the tier column.",
+        "# For No tier, overall is omitted and the native addon removes any existing team tier entry.",
         low_sample_note,
         header_line,
     ]
@@ -1675,6 +1793,65 @@ def render_policy_tsv(policy, profile_key):
             lines.append(f"{row['championId']}\t{tier}{suffix}")
         else:
             lines.append(f"{row['championId']}\t{tier}\t{round1(overall):.1f}{suffix}")
+    return "\n".join(lines) + "\n"
+
+
+def render_ai_candidate_map_tsv(policy):
+    meta = policy["metadata"]
+    active_external_count = int(meta.get("activeExternalChampionCount") or 0)
+    expected_runtime_count = len(BASE_CANDIDATE_ORDER) + active_external_count
+    mode = "conditional_custom" if active_external_count else "base_only"
+    rows = []
+    for row in policy.get("rows") or []:
+        champion_id = str(row.get("championId") or "").strip()
+        if not champion_id:
+            continue
+        try:
+            candidate_index = int(row.get("candidateIndex"))
+        except (TypeError, ValueError):
+            continue
+        base_index = BASE_CANDIDATE_INDEX.get(champion_id)
+        if base_index is not None and base_index == candidate_index:
+            source = "base"
+            status = "verified_base"
+        elif champion_id not in BASE_CANDIDATE_INDEX:
+            source = "active_external"
+            status = "conditional_external"
+        else:
+            source = "base"
+            status = "rejected_index_mismatch"
+        rows.append(
+            {
+                "candidateIndex": candidate_index,
+                "championId": champion_id,
+                "source": source,
+                "status": status,
+            }
+        )
+    rows.sort(key=lambda row: (row["candidateIndex"], row["championId"]))
+
+    lines = [
+        "# AUTO_GENERATED_BY_TFM2_META_DASHBOARD",
+        "# Do not hand-edit unless you intentionally want to override dashboard AI draft mapping.",
+        f"# Generated: {meta['generatedAt']}",
+        f"# Source: {meta.get('source')}",
+        f"# Patch: {meta.get('patch')}",
+        f"# Scope: {meta.get('scope')}",
+        f"# Preset: {meta.get('preset')}",
+        "# MapKind: aiCandidateMap",
+        f"# CustomCandidateMode: {mode}",
+        f"# BaseCandidateCount: {len(BASE_CANDIDATE_ORDER)}",
+        f"# ActiveExternalChampionCount: {active_external_count}",
+        f"# ExpectedRuntimeChampionCount: {expected_runtime_count}",
+        "# Verification: custom rows are applied only when runtime available_champions count matches ExpectedRuntimeChampionCount.",
+        "# Verification: base rows must match the built-in 0..59 candidate order.",
+        "# Format: candidate_index<TAB>champion_id<TAB>source<TAB>status",
+        "# candidate_index\tchampion_id\tsource\tstatus",
+    ]
+    for row in rows:
+        lines.append(
+            f"{row['candidateIndex']}\t{row['championId']}\t{row['source']}\t{row['status']}"
+        )
     return "\n".join(lines) + "\n"
 
 
@@ -1708,6 +1885,7 @@ def write_policy_exports(champion_tier_policy, ai_champion_policy=None):
     ai_champion_policy = ai_champion_policy or champion_tier_policy
     tier_text = render_policy_tsv(champion_tier_policy, "championTier")
     ai_text = render_policy_tsv(ai_champion_policy, "aiChampion")
+    ai_candidate_map_text = render_ai_candidate_map_tsv(ai_champion_policy)
     tier_written, tier_skipped = write_policy_file(
         tier_text,
         [CHAMPION_TIER_POLICY_OUT],
@@ -1718,6 +1896,11 @@ def write_policy_exports(champion_tier_policy, ai_champion_policy=None):
         [AI_CHAMPION_POLICY_OUT],
         [AI_CHAMPION_POLICY_MOD_OUT, AI_CHAMPION_POLICY_SOURCE_MOD_OUT],
     )
+    candidate_map_written, candidate_map_skipped = write_policy_file(
+        ai_candidate_map_text,
+        [AI_CANDIDATE_MAP_OUT],
+        [AI_CANDIDATE_MAP_MOD_OUT, AI_CANDIDATE_MAP_SOURCE_MOD_OUT],
+    )
     return {
         "championTierPolicy": {
             "written": [str(path) for path in tier_written],
@@ -1726,6 +1909,10 @@ def write_policy_exports(champion_tier_policy, ai_champion_policy=None):
         "aiChampionPolicy": {
             "written": [str(path) for path in ai_written],
             "skipped": ai_skipped,
+        },
+        "aiCandidateMap": {
+            "written": [str(path) for path in candidate_map_written],
+            "skipped": candidate_map_skipped,
         },
     }
 
@@ -4768,6 +4955,11 @@ def parse_args():
 def build_policy_exports_from_payload(payload, generated_at=None):
     generated_at = generated_at or datetime.now().isoformat(timespec="seconds")
     champions = payload.get("champions") or []
+    game_root = detect_game_root_for_mods(ROOT)
+    policy_split = split_policy_champions_for_current_mods(champions, game_root)
+    champion_tier_champions = policy_split["championTierChampions"]
+    ai_champions = policy_split["aiChampions"]
+    inactive_external_ids = policy_split["inactiveExternalIds"]
     stats_by_scope = payload.get("statsByScope") or {}
     stats_by_patch = payload.get("statsByPatch") or {}
     patch_versions = list(payload.get("patches") or [])
@@ -4791,7 +4983,7 @@ def build_policy_exports_from_payload(payload, generated_at=None):
         scope="overall",
     )
     champion_tier_policy_exports = build_policy_exports(
-        champions,
+        champion_tier_champions,
         tier_policy_stats,
         generated_at,
         save_path,
@@ -4800,9 +4992,10 @@ def build_policy_exports_from_payload(payload, generated_at=None):
         replay_date_status,
         score_model_spec,
         scope="tournament",
+        cleanup_champion_ids=inactive_external_ids,
     )
     ai_champion_policy_exports = build_policy_exports(
-        champions,
+        ai_champions,
         ai_policy_stats,
         generated_at,
         save_path,
@@ -4812,6 +5005,10 @@ def build_policy_exports_from_payload(payload, generated_at=None):
         score_model_spec,
         scope="overall",
     )
+    champion_tier_policy_exports["metadata"]["activeExternalChampionCount"] = policy_split["activeExternalCount"]
+    champion_tier_policy_exports["metadata"]["inactiveExternalCleanupCount"] = policy_split["inactiveExternalCount"]
+    ai_champion_policy_exports["metadata"]["activeExternalChampionCount"] = policy_split["activeExternalCount"]
+    ai_champion_policy_exports["metadata"]["customCandidatePolicy"] = "candidate_map_conditional_fail_closed"
     return champion_tier_policy_exports, ai_champion_policy_exports
 
 
@@ -5130,6 +5327,7 @@ def main():
 
     generated_at = datetime.now().isoformat(timespec="seconds")
     core_item_builds = build_core_item_builds(full_match_analysis, generated_at, save_path, patch_versions, item_catalog)
+    policy_split = split_policy_champions_for_current_mods(champions, external_mod_game_root)
     tier_policy_stats, tier_policy_patch, tier_policy_source = select_policy_stats(
         tournament_stats,
         stats_by_patch,
@@ -5143,7 +5341,7 @@ def main():
         scope="overall",
     )
     champion_tier_policy_exports = build_policy_exports(
-        champions,
+        policy_split["championTierChampions"],
         tier_policy_stats,
         generated_at,
         save_path,
@@ -5152,9 +5350,10 @@ def main():
         replay_date_status,
         score_model_spec,
         scope="tournament",
+        cleanup_champion_ids=policy_split["inactiveExternalIds"],
     )
     ai_champion_policy_exports = build_policy_exports(
-        champions,
+        policy_split["aiChampions"],
         ai_policy_stats,
         generated_at,
         save_path,
@@ -5164,6 +5363,10 @@ def main():
         score_model_spec,
         scope="overall",
     )
+    champion_tier_policy_exports["metadata"]["activeExternalChampionCount"] = policy_split["activeExternalCount"]
+    champion_tier_policy_exports["metadata"]["inactiveExternalCleanupCount"] = policy_split["inactiveExternalCount"]
+    ai_champion_policy_exports["metadata"]["activeExternalChampionCount"] = policy_split["activeExternalCount"]
+    ai_champion_policy_exports["metadata"]["customCandidatePolicy"] = "candidate_map_conditional_fail_closed"
     policy_export_status = write_policy_exports(champion_tier_policy_exports, ai_champion_policy_exports)
     strip_internal_score_fields_for_payload(
         combined_stats,
