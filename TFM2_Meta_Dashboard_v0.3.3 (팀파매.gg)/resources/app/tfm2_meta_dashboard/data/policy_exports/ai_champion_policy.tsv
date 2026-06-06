@@ -1,31 +1,31 @@
 # AUTO_GENERATED_BY_TFM2_META_DASHBOARD
 # Do not hand-edit unless you intentionally want to override dashboard meta scoring.
-# Generated: 2026-06-06T22:26:36
-# Save: C:\Users\hexas\AppData\Roaming\TeamSamoyed\TeamfightManager2\data\save_20260606_010734.data
-# Source: overall all patches
-# Patch: all
+# Generated: 2026-06-06T23:39:18
+# Save: C:\Users\hexas\AppData\Roaming\TeamSamoyed\TeamfightManager2\data\save_20260606_171107.data
+# Source: overall patch 2026.0.1
+# Patch: 2026.0.1
 # Scope: overall
 # Region: all
 # Role: all
 # Model: tfm2gg-meta-v1
-# Preset: classic weights={"draftPressure": 0.16, "lowerPressure": 0.12, "lowerStrength": 0.88, "strength": 0.84}
-# PolicyPresetSource: dashboard setting
-# Sample: early min=5 reason=0 matches
-# SampleVolume: 0.0
+# Preset: fearless weights={"draftPressure": 0.22, "lowerPressure": 0.18, "lowerStrength": 0.82, "strength": 0.78}
+# PolicyPresetSource: policy setting
+# Sample: early min=5 reason=4 matches
+# SampleVolume: 4.0
 # PatchGate: mode=- decision=- source=- mature=None
-# RequestedPatch: all
-# EffectivePatch: all
+# RequestedPatch: 2026.0.1
+# EffectivePatch: 2026.0.1
 # HoldReason: -
-# GateMetrics: matches=0.0 min=- fallback=- eligible=0/64 required=-
-# WinPrior: mean=50.0 kappa=24.0
-# BaselinePresence: 0.1
+# GateMetrics: matches=4.0 min=- fallback=- eligible=0/64 required=-
+# WinPrior: mean=50.0 kappa=50.0
+# BaselinePresence: 52.9
 # PolicyKind: aiChampion
 # OverallSemantic: ai_bias_scaled_from_meta_tier
 # OverallNote: overall is scaled for AI draft bias so the native addon has a visible but capped effect.
 # OverallAnchors: {"A": 70.0, "B": 60.0, "C": 50.0, "D": 40.0, "S": 80.0}
 # NativeBiasFormula: clamp((overall - 50) / 20, -1.5, 1.5)
 # Format: champion_id<TAB>tier<TAB>overall<TAB>candidate_index
-# For No tier, overall is omitted and the native addon removes any existing team tier entry.
+# For No tier, overall is omitted and the native addon writes an explicit NoTier entry.
 # Non-eligible or low-sample champions are emitted as neutral C/50.0.
 # champion_id	tier	overall	candidate_index
 hitman	C	50.0	56

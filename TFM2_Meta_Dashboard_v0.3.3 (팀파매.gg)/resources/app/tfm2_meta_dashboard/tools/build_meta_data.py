@@ -1704,6 +1704,8 @@ def build_policy_exports(
     rows = []
     for entry in entries:
         cleanup_row = entry["championId"] in cleanup_champion_ids
+        if cleanup_row:
+            continue
         policy_tier = "No" if cleanup_row else entry["policyTier"]
         tier_overall = tier_policy_overall(policy_tier, entry["eligible"])
         ai_overall = 50.0 if cleanup_row else ai_policy_overall(entry)
@@ -1713,11 +1715,11 @@ def build_policy_exports(
                 "championName": entry["championName"],
                 "candidateIndex": entry.get("candidateIndex"),
                 "tier": policy_tier,
-                "aiTier": policy_tier if entry["eligible"] and not cleanup_row else "C",
+                "aiTier": policy_tier if entry["eligible"] else "C",
                 "tierOverall": round1(tier_overall) if tier_overall is not None else None,
                 "aiOverall": round1(ai_overall),
                 "rawOverall": round1(entry["policyOverall"] if entry["eligible"] else 50.0),
-                "eligible": entry["eligible"] and not cleanup_row,
+                "eligible": entry["eligible"],
                 "metaTier": entry.get("tier") or "-",
                 "score": entry.get("score"),
                 "metaLower": entry.get("metaLower"),
@@ -1727,7 +1729,7 @@ def build_policy_exports(
                 "reliability": entry.get("reliability"),
                 "pickCount": entry.get("pickCount"),
                 "winRate": entry.get("winRate"),
-                "reason": "inactive_external_champion_mod_cleanup" if cleanup_row else entry.get("reason"),
+                "reason": entry.get("reason"),
             }
         )
     rows.sort(
@@ -1766,7 +1768,7 @@ def build_policy_exports(
         "baselinePresence": round1((context.get("exposure", {}).get("presence") or 0) * 100),
         "eligibleCount": len(eligible),
         "rowCount": len(rows),
-        "activeRowCount": max(0, len(rows) - len(cleanup_champion_ids)),
+        "activeRowCount": len(rows),
         "cleanupRowCount": len(cleanup_champion_ids),
         "policyProfiles": {
             "championTier": {
@@ -1774,7 +1776,7 @@ def build_policy_exports(
                 "overallField": "tierOverall",
                 "semantic": "dashboard_meta_tier_for_in_game_sabcd_no",
                 "anchors": TIER_POLICY_OVERALL_ANCHORS,
-                "note": "overall is an S/A/B/C/D anchor for the native tier addon; No leaves overall blank and removes the champion from team tier maps.",
+                "note": "overall is an S/A/B/C/D anchor for the native tier addon; No leaves overall blank and is applied as explicit NoTier for active champions.",
             },
             "aiChampion": {
                 "tierField": "aiTier",
@@ -1841,7 +1843,7 @@ def render_policy_tsv(policy, profile_key):
         f"# OverallAnchors: {json.dumps(profile.get('anchors') or {}, sort_keys=True, ensure_ascii=False)}",
         f"# NativeBiasFormula: {native_bias_formula}",
         format_line,
-        "# For No tier, overall is omitted and the native addon removes any existing team tier entry.",
+        "# For No tier, overall is omitted and the native addon writes an explicit NoTier entry.",
         low_sample_note,
         header_line,
     ]

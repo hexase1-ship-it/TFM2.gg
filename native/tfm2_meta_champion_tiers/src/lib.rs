@@ -21,7 +21,7 @@ struct TierPolicy {
     source: PathBuf,
     modified: Option<SystemTime>,
     size: Option<u64>,
-    rows: HashMap<String, Option<ChampionTier>>,
+    rows: HashMap<String, ChampionTier>,
 }
 
 #[derive(Default)]
@@ -36,6 +36,12 @@ struct MetaTierClient;
 struct MetaTierServer;
 
 impl ModExtension for MetaTierClient {
+    fn pre_update(&self, scene: &mut Scene, _ui: &mut GameUI, _assets: &mut Assets, _dt: f32) {
+        let _ = catch_unwind(AssertUnwindSafe(|| {
+            apply_policy_to_scene(scene, "client_pre_update")
+        }));
+    }
+
     fn post_update(&self, scene: &mut Scene, _ui: &mut GameUI, _assets: &mut Assets, _dt: f32) {
         let _ = catch_unwind(AssertUnwindSafe(|| {
             apply_policy_to_scene(scene, "client_post_update")
@@ -60,35 +66,23 @@ fn apply_policy_to_scene(scene: &mut Scene, source_label: &str) {
     let mut already_matched = 0usize;
     let mut missing = 0usize;
     let mut mismatched = 0usize;
-    let mut removed = 0usize;
+    let removed = 0usize;
     for team in db.teams.values_mut() {
         teams += 1;
         for (champion_id, desired) in &policy.rows {
-            match desired {
-                Some(tier) => {
-                    match team.champion_tiers.get(champion_id) {
-                        Some(current) if current == tier => {
-                            already_matched += 1;
-                        }
-                        Some(_) => {
-                            team.champion_tiers.insert(champion_id.clone(), *tier);
-                            changed += 1;
-                            mismatched += 1;
-                        }
-                        None => {
-                            team.champion_tiers.insert(champion_id.clone(), *tier);
-                            changed += 1;
-                            missing += 1;
-                        }
-                    }
+            match team.champion_tiers.get(champion_id) {
+                Some(current) if current == desired => {
+                    already_matched += 1;
+                }
+                Some(_) => {
+                    team.champion_tiers.insert(champion_id.clone(), *desired);
+                    changed += 1;
+                    mismatched += 1;
                 }
                 None => {
-                    if team.champion_tiers.remove(champion_id).is_some() {
-                        changed += 1;
-                        removed += 1;
-                    } else {
-                        already_matched += 1;
-                    }
+                    team.champion_tiers.insert(champion_id.clone(), *desired);
+                    changed += 1;
+                    missing += 1;
                 }
             }
         }
@@ -196,33 +190,33 @@ fn parse_policy(
     })
 }
 
-fn parse_tier(label: &str, overall: Option<&str>) -> Result<Option<ChampionTier>, String> {
+fn parse_tier(label: &str, overall: Option<&str>) -> Result<ChampionTier, String> {
     match label.trim().to_ascii_uppercase().as_str() {
-        "S" | "OP" => Ok(Some(ChampionTier::S)),
-        "A" | "1" => Ok(Some(ChampionTier::A)),
-        "B" | "2" => Ok(Some(ChampionTier::B)),
-        "C" | "3" => Ok(Some(ChampionTier::C)),
-        "D" | "4" => Ok(Some(ChampionTier::D)),
-        "NO" | "NO-TIER" | "NONE" | "-" => Ok(None),
+        "S" | "OP" => Ok(ChampionTier::S),
+        "A" | "1" => Ok(ChampionTier::A),
+        "B" | "2" => Ok(ChampionTier::B),
+        "C" | "3" => Ok(ChampionTier::C),
+        "D" | "4" => Ok(ChampionTier::D),
+        "NO" | "NO-TIER" | "NONE" | "-" => Ok(ChampionTier::NoTier),
         "" => derive_tier_from_overall(overall),
         other => derive_tier_from_overall(overall).map_err(|_| format!("unknown tier '{other}'")),
     }
 }
 
-fn derive_tier_from_overall(overall: Option<&str>) -> Result<Option<ChampionTier>, String> {
-    let value = overall
-        .and_then(|text| text.trim().parse::<f32>().ok())
-        .ok_or_else(|| "missing tier and overall".to_string())?;
+fn derive_tier_from_overall(overall: Option<&str>) -> Result<ChampionTier, String> {
+    let Some(value) = overall.and_then(|text| text.trim().parse::<f32>().ok()) else {
+        return Ok(ChampionTier::NoTier);
+    };
     if value >= 85.0 {
-        Ok(Some(ChampionTier::S))
+        Ok(ChampionTier::S)
     } else if value >= 72.0 {
-        Ok(Some(ChampionTier::A))
+        Ok(ChampionTier::A)
     } else if value >= 60.0 {
-        Ok(Some(ChampionTier::B))
+        Ok(ChampionTier::B)
     } else if value >= 48.0 {
-        Ok(Some(ChampionTier::C))
+        Ok(ChampionTier::C)
     } else {
-        Ok(Some(ChampionTier::D))
+        Ok(ChampionTier::D)
     }
 }
 
@@ -359,8 +353,7 @@ fn write_latest_snapshot(policy: &TierPolicy, summary: &str) {
         let _ = writeln!(file, "{summary}");
         let _ = writeln!(file, "source={}", policy.source.display());
         for (champion, tier) in &policy.rows {
-            let label = tier.map(tier_label).unwrap_or("No");
-            let _ = writeln!(file, "{champion}\t{label}");
+            let _ = writeln!(file, "{champion}\t{}", tier_label(*tier));
         }
     }
 }

@@ -1,100 +1,94 @@
 # AUTO_GENERATED_BY_TFM2_META_DASHBOARD
 # Do not hand-edit unless you intentionally want to override dashboard meta scoring.
-# Generated: 2026-06-06T22:26:36
-# Save: C:\Users\hexas\AppData\Roaming\TeamSamoyed\TeamfightManager2\data\save_20260606_010734.data
-# Source: tournament all patches
-# Patch: all
+# Generated: 2026-06-06T23:39:18
+# Save: C:\Users\hexas\AppData\Roaming\TeamSamoyed\TeamfightManager2\data\save_20260606_171107.data
+# Source: tournament patch 2026.0.0
+# Patch: 2026.0.0
 # Scope: tournament
 # Region: all
 # Role: all
 # Model: tfm2gg-meta-v1
-# Preset: classic weights={"draftPressure": 0.16, "lowerPressure": 0.12, "lowerStrength": 0.88, "strength": 0.84}
-# PolicyPresetSource: dashboard setting
-# Sample: early min=5 reason=0 matches
-# SampleVolume: 0.0
-# PatchGate: mode=sampleGate decision=hold_existing_tsv_last_resort source=existing_tsv_last_resort mature=False
-# RequestedPatch: all
-# EffectivePatch: all
-# HoldReason: sample 0/100, eligible 0/29
-# GateMetrics: matches=0.0 min=100 fallback=50 eligible=0/64 required=29
-# WinPrior: mean=50.0 kappa=24.0
-# BaselinePresence: 0.1
+# Preset: fearless weights={"draftPressure": 0.22, "lowerPressure": 0.18, "lowerStrength": 0.82, "strength": 0.78}
+# PolicyPresetSource: policy setting
+# Sample: early min=5 reason=4 matches
+# SampleVolume: 4.0
+# PatchGate: mode=sampleGate decision=hold_previous source=history mature=False
+# RequestedPatch: 2026.0.1
+# EffectivePatch: 2026.0.0
+# HoldReason: sample 4/100, eligible 0/29
+# GateMetrics: matches=4.0 min=100 fallback=50 eligible=0/64 required=29
+# WinPrior: mean=50.0 kappa=50.0
+# BaselinePresence: 49.5
 # PolicyKind: championTier
 # OverallSemantic: dashboard_meta_tier_for_in_game_sabcd_no
-# OverallNote: overall is an S/A/B/C/D anchor for the native tier addon; No leaves overall blank and removes the champion from team tier maps.
+# OverallNote: overall is an S/A/B/C/D anchor for the native tier addon; No leaves overall blank and is applied as explicit NoTier for active champions.
 # OverallAnchors: {"A": 75.0, "B": 62.0, "C": 50.0, "D": 35.0, "S": 90.0}
 # NativeBiasFormula: -
 # Format: champion_id<TAB>tier<TAB>overall
-# For No tier, overall is omitted and the native addon removes any existing team tier entry.
+# For No tier, overall is omitted and the native addon writes an explicit NoTier entry.
 # Non-eligible or low-sample champions are emitted as No with blank overall.
 # champion_id	tier	overall
-hitman	No
-vampire	No
-dark_mage	No
-illusionist	No
-pyromancer	No
-bomber	No
-gunner	C	50.0
+hitman	D	35.0
+vampire	B	62.0
+dark_mage	D	35.0
+illusionist	C	50.0
+pyromancer	C	50.0
+bomber	A	75.0
+gunner	A	75.0
 executioner	D	35.0
-whip_master	No
-lancer	No
-hammerer	No
-prisoner	No
+whip_master	A	75.0
+lancer	A	75.0
+hammerer	D	35.0
+prisoner	D	35.0
 spirit_caller	No
 enchanter	No
-inquisitor	No
-bard	No
+inquisitor	D	35.0
+bard	D	35.0
 ghost	D	35.0
 chef	No
-ogre	No
+ogre	D	35.0
 oni	No
 plague_doctor	No
-exorcist	No
-ice_mage	D	35.0
-android	No
+exorcist	D	35.0
+ice_mage	C	50.0
+android	S	90.0
 demon	No
-guardian_spirit	C	50.0
-soldier	C	50.0
-priest	No
-hunter	D	35.0
-boomerang_hunter	No
+guardian_spirit	D	35.0
+soldier	A	75.0
+priest	D	35.0
+hunter	A	75.0
+boomerang_hunter	D	35.0
 voodoo_shaman	No
-pole_warrior	No
-lightning_mage	No
-white_mage	C	50.0
-shield_bearer	B	62.0
-beast_valtan	C	50.0
-wind_mage	D	35.0
+pole_warrior	D	35.0
+lightning_mage	D	35.0
+white_mage	D	35.0
+shield_bearer	C	50.0
+beast_valtan	No
+wind_mage	A	75.0
 dancer	D	35.0
 pythoness	C	50.0
-monk	No
+monk	A	75.0
 malphite	No
-magic_knight	No
-druid	No
-dual_blader	No
-poison_dart_hunter	No
+magic_knight	D	35.0
+druid	D	35.0
+dual_blader	S	90.0
+poison_dart_hunter	C	50.0
 taoist	No
 gambler	B	62.0
-dokkaebi	No
+dokkaebi	D	35.0
 squirrel	No
-ninja	No
-werewolf	No
+ninja	D	35.0
+werewolf	D	35.0
 necromancer	No
-knight	No
-cavalry_knight	D	35.0
-shadowmancer	No
+knight	C	50.0
+cavalry_knight	S	90.0
+shadowmancer	C	50.0
 archer	B	62.0
-berserker	No
-clown	No
-siege_breaker	D	35.0
-circus_blade	No
-barrier_magician	No
+berserker	D	35.0
+clown	D	35.0
+siege_breaker	C	50.0
+circus_blade	C	50.0
+barrier_magician	D	35.0
 fighter	C	50.0
-swordman	C	50.0
-jiangshi	No
-test_mod_viktor	No
-test_mod_veigar	No
-test_mod_vayne	No
-test_mod_jhin	No
-test_mod_fiddlesticks	No
-test_mod_aatrox	No
+swordman	B	62.0
+jiangshi	D	35.0
