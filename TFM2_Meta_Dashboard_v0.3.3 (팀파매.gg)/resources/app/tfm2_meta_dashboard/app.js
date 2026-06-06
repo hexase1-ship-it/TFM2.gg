@@ -44,6 +44,18 @@ const addonPolicyPresetModes = [
   ["hardFearless", "인게임: 하드 피어리스"],
 ];
 
+const tierPolicyGateModes = [
+  ["sampleGate", "표본 확보 후 최신 패치 적용"],
+  ["immediate", "표본 부족해도 즉시 적용"],
+  ["locked", "현재 인게임 티어 유지"],
+];
+
+const tierPolicyGateDescriptions = {
+  sampleGate: "권장: 패치 직후 표본이 적으면 이전 안정 티어를 유지하고, 대회 데이터가 충분히 쌓이면 최신 패치 티어로 전환합니다.",
+  immediate: "테스트용: 최신 패치 표본이 부족해도 바로 인게임 티어표를 덮어씁니다. 패치 직후에는 No 티어가 많아질 수 있습니다.",
+  locked: "고정: 새 데이터가 쌓여도 현재 적용된 인게임 티어표를 유지합니다. 직접 바꾸기 전까지 보수적으로 묶어둡니다.",
+};
+
 const sampleModes = [
   ["auto", "자동 표본"],
   ["early", "초반 5픽"],
@@ -124,6 +136,7 @@ const leagueMeta = DATA.leagueMeta || {};
 let metaTierCache = null;
 let addonPolicySettings = {
   addonPolicyPreset: "followDashboard",
+  tierPolicyGateMode: "sampleGate",
   dashboardPreset: state.tierPreset,
   effectivePreset: state.tierPreset,
   lastAppliedPreset: null,
@@ -132,6 +145,7 @@ let addonPolicySettings = {
 };
 let addonPolicyBusy = false;
 let addonPolicyMenuOpen = false;
+let tierPolicyGateMenuOpen = false;
 
 function splitPayloadForScope(scope = state.scope) {
   if (scope === "overall") return DATA.combinedSplits || {};
@@ -460,10 +474,14 @@ function tierPresetLabel(id) {
 
 function normalizeAddonPolicySettings(settings = addonPolicySettings) {
   const modeValues = addonPolicyPresetModes.map(([value]) => value);
+  const gateValues = tierPolicyGateModes.map(([value]) => value);
   const presetValues = tierPresets.map(([value]) => value);
   const addonPolicyPreset = modeValues.includes(settings.addonPolicyPreset)
     ? settings.addonPolicyPreset
     : "followDashboard";
+  const tierPolicyGateMode = gateValues.includes(settings.tierPolicyGateMode)
+    ? settings.tierPolicyGateMode
+    : "sampleGate";
   const dashboardPreset = presetValues.includes(settings.dashboardPreset)
     ? settings.dashboardPreset
     : state.tierPreset;
@@ -471,6 +489,7 @@ function normalizeAddonPolicySettings(settings = addonPolicySettings) {
   return {
     ...settings,
     addonPolicyPreset,
+    tierPolicyGateMode,
     dashboardPreset: state.tierPreset || dashboardPreset,
     effectivePreset,
   };
@@ -539,12 +558,63 @@ function renderAddonPolicyControls() {
   if (!select || !button || !status) return;
   addonPolicySettings = normalizeAddonPolicySettings(addonPolicySettings);
   renderAddonPolicyMenu();
+  renderTierPolicyGateControl();
   const statusInfo = addonPolicyStatusText(addonPolicySettings);
   status.textContent = statusInfo.text;
   status.title = statusInfo.title || statusInfo.text;
   status.className = `addon-policy-status ${statusInfo.className}`;
   button.title = `인게임 애드온 티어표 적용 (${tierPresetLabel(addonPolicySettings.effectivePreset)} 기준)`;
   button.disabled = addonPolicyBusy || !window.tfm2ggPolicy;
+}
+
+function tierPolicyGateModeLabel(value) {
+  return tierPolicyGateModes.find(([mode]) => mode === value)?.[1] || tierPolicyGateModes[0][1];
+}
+
+function setTierPolicyGateMenuOpen(open) {
+  tierPolicyGateMenuOpen = Boolean(open);
+  const select = document.getElementById("tierPolicyGateModeSelect");
+  const menu = document.getElementById("tierPolicyGateModeMenu");
+  if (!select || !menu) return;
+  select.classList.toggle("open", tierPolicyGateMenuOpen);
+  select.setAttribute("aria-expanded", tierPolicyGateMenuOpen ? "true" : "false");
+  menu.hidden = !tierPolicyGateMenuOpen;
+}
+
+function renderTierPolicyGateMenu() {
+  const select = document.getElementById("tierPolicyGateModeSelect");
+  const label = document.getElementById("tierPolicyGateModeLabel");
+  const menu = document.getElementById("tierPolicyGateModeMenu");
+  if (!select || !label || !menu) return;
+  const mode = addonPolicySettings.tierPolicyGateMode || "sampleGate";
+  select.dataset.value = mode;
+  select.title = tierPolicyGateDescriptions[mode] || tierPolicyGateDescriptions.sampleGate;
+  label.textContent = tierPolicyGateModeLabel(mode);
+  menu.innerHTML = tierPolicyGateModes
+    .map(([value, optionLabel]) => `
+      <button
+        type="button"
+        class="addon-policy-option tier-policy-option ${mode === value ? "active" : ""}"
+        data-tier-policy-gate-mode="${value}"
+        role="option"
+        aria-selected="${mode === value ? "true" : "false"}"
+      >${optionLabel}</button>`)
+    .join("");
+  setTierPolicyGateMenuOpen(tierPolicyGateMenuOpen);
+}
+
+function renderTierPolicyGateControl() {
+  const box = document.getElementById("tierPolicyGateBox");
+  const description = document.getElementById("tierPolicyGateDescription");
+  if (!description) return;
+  const mode = addonPolicySettings.tierPolicyGateMode || "sampleGate";
+  renderTierPolicyGateMenu();
+  description.textContent = tierPolicyGateDescriptions[mode] || tierPolicyGateDescriptions.sampleGate;
+  description.title = description.textContent;
+  if (box) {
+    box.dataset.mode = mode;
+    box.title = description.textContent;
+  }
 }
 
 async function saveAddonPolicySettings(partial = {}) {
@@ -1595,6 +1665,7 @@ function renderControls() {
       .join("");
   }
   renderAddonPolicyControls();
+  renderTierPolicyGateControl();
   const sampleModeSelect = document.getElementById("sampleModeSelect");
   if (sampleModeSelect) {
     sampleModeSelect.innerHTML = sampleModes
@@ -1633,6 +1704,55 @@ function renderChampionGrid(champs) {
   });
 }
 
+function addonTierPolicyGateSummary() {
+  const policyExportSource = DATA.policyExportSource || DATA.sources?.policyExportSource || {};
+  const meta = policyExportSource.championTier || {};
+  const gate = meta.gate || {};
+  const decision = gate.decision || "";
+  const requested = gate.requestedPatch || meta.patch || "";
+  const effective = gate.effectivePatch || meta.patch || "";
+  const requestedLabel = requested || "확인 전";
+  const effectiveLabel = effective || "확인 전";
+  const sample = gate.sampleVolume ?? meta.sampleVolume ?? "-";
+  const minMatches = gate.minMatches || "-";
+  const eligible = gate.eligibleCount ?? meta.eligibleCount ?? "-";
+  const active = gate.activeRowCount ?? meta.activeRowCount ?? meta.rowCount ?? "-";
+  const baseTitle = `인게임 티어 정책: ${meta.source || "정책 메타데이터 없음"}`;
+  if (!meta.source && !decision) {
+    return {
+      label: "인게임 티어 기준",
+      value: "새로고침 필요",
+      title: "현재 화면에 인게임 티어 정책 메타데이터가 아직 로드되지 않았습니다. 대시보드를 새로고침하거나 통계를 다시 생성하면 기준이 표시됩니다.",
+    };
+  }
+  if (!decision) {
+    return {
+      label: "인게임 티어 기준",
+      value: effectiveLabel,
+      title: baseTitle,
+    };
+  }
+  if (decision.startsWith("hold") || decision === "fallback_all_patches") {
+    return {
+      label: "인게임 티어 기준",
+      value: `이전 유지: ${effectiveLabel}`,
+      title: `최신 ${requestedLabel} 표본 부족으로 ${effectiveLabel} 기준을 유지합니다. 표본 ${sample}/${minMatches}, 산출 ${eligible}/${active}`,
+    };
+  }
+  if (decision === "apply_immediate") {
+    return {
+      label: "인게임 티어 기준",
+      value: `즉시 적용: ${effectiveLabel}`,
+      title: `표본 부족 여부와 관계없이 수동 즉시 적용 중입니다. 표본 ${sample}/${minMatches}, 산출 ${eligible}/${active}`,
+    };
+  }
+  return {
+    label: "인게임 티어 기준",
+    value: `최신 적용: ${effectiveLabel}`,
+    title: `최신 패치 기준으로 인게임 티어표를 적용 중입니다. 표본 ${sample}/${minMatches}, 산출 ${eligible}/${active}`,
+  };
+}
+
 function renderSummary(champs) {
   const stats = scopedStats();
   const collected = champs.filter((champ) => displayStatOf(champ.id).pickCount > 0).length;
@@ -1643,6 +1763,7 @@ function renderSummary(champs) {
   const preset = currentTierPreset();
   const split = activeTournamentSplit();
   const splitLabel = split ? activeSplitLabel() : tournamentSplitOptions()[0][1];
+  const addonGate = addonTierPolicyGateSummary();
   document.getElementById("summaryGrid").innerHTML = `
     <div class="summary-card"><span>범위</span><strong>${scopeLabels[state.scope]}</strong></div>
     <div class="summary-card"><span>지역/세부 범위</span><strong>${splitLabel}</strong></div>
@@ -1652,6 +1773,7 @@ function renderSummary(champs) {
     <div class="summary-card"><span>관계 경기 표본</span><strong>${(relations.groups || 0).toLocaleString()}</strong></div>
     <div class="summary-card"><span>티어 기준</span><strong>${preset.label}</strong></div>
     <div class="summary-card"><span>표본 기준</span><strong>${sampleInfo.label}</strong></div>
+    <div class="summary-card" title="${addonGate.title}"><span>${addonGate.label}</span><strong>${addonGate.value}</strong></div>
     <div class="summary-card" title="${replayDateQualityTitle(replayInfo)}"><span>날짜 추정</span><strong>${fmt(replayInfo.assigned || 0)} / ${fmt(replayInfo.sets || 0)}</strong></div>
   `;
   const exportMismatched = Boolean(DATA.sources.metaExportMismatched);
@@ -3107,9 +3229,72 @@ document.getElementById("addonPolicyPresetSelect")?.addEventListener("keydown", 
   }
 });
 
+document.getElementById("tierPolicyGateModeSelect")?.addEventListener("click", (event) => {
+  const option = event.target?.closest?.("[data-tier-policy-gate-mode]");
+  if (option) {
+    setTierPolicyGateMenuOpen(false);
+    saveAddonPolicySettings({ tierPolicyGateMode: option.dataset.tierPolicyGateMode });
+    return;
+  }
+  setTierPolicyGateMenuOpen(!tierPolicyGateMenuOpen);
+});
+
+document.getElementById("tierPolicyGateModeSelect")?.addEventListener("keydown", (event) => {
+  const option = event.target?.closest?.("[data-tier-policy-gate-mode]");
+  if (option && event.key === "Escape") {
+    event.preventDefault();
+    setTierPolicyGateMenuOpen(false);
+    document.getElementById("tierPolicyGateModeSelect")?.focus();
+    return;
+  }
+  if (option && (event.key === "Enter" || event.key === " ")) {
+    event.preventDefault();
+    setTierPolicyGateMenuOpen(false);
+    saveAddonPolicySettings({ tierPolicyGateMode: option.dataset.tierPolicyGateMode });
+    document.getElementById("tierPolicyGateModeSelect")?.focus();
+    return;
+  }
+  if (option && (event.key === "ArrowDown" || event.key === "ArrowUp")) {
+    event.preventDefault();
+    const options = [...document.querySelectorAll("[data-tier-policy-gate-mode]")];
+    const index = Math.max(0, options.indexOf(option));
+    const nextIndex = event.key === "ArrowDown"
+      ? Math.min(options.length - 1, index + 1)
+      : Math.max(0, index - 1);
+    options[nextIndex]?.focus();
+    return;
+  }
+  if (event.key === "Enter" || event.key === " ") {
+    event.preventDefault();
+    setTierPolicyGateMenuOpen(!tierPolicyGateMenuOpen);
+    if (tierPolicyGateMenuOpen) {
+      requestAnimationFrame(() => {
+        document.querySelector(".tier-policy-option.active")?.focus()
+          || document.querySelector(".tier-policy-option")?.focus();
+      });
+    }
+    return;
+  }
+  if (event.key === "ArrowDown") {
+    event.preventDefault();
+    setTierPolicyGateMenuOpen(true);
+    requestAnimationFrame(() => {
+      document.querySelector(".tier-policy-option.active")?.focus()
+        || document.querySelector(".tier-policy-option")?.focus();
+    });
+    return;
+  }
+  if (event.key === "Escape") {
+    setTierPolicyGateMenuOpen(false);
+  }
+});
+
 document.addEventListener("click", (event) => {
   if (!event.target?.closest?.("#addonPolicyPresetSelect")) {
     setAddonPolicyMenuOpen(false);
+  }
+  if (!event.target?.closest?.("#tierPolicyGateModeSelect")) {
+    setTierPolicyGateMenuOpen(false);
   }
 });
 

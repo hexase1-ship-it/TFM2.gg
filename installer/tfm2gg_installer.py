@@ -290,6 +290,42 @@ def read_policy_rows(path: Path) -> list[dict]:
     return rows
 
 
+def read_policy_headers(path: Path) -> dict[str, str]:
+    if not path.exists():
+        return {}
+    try:
+        lines = path.read_text(encoding="utf-8-sig", errors="replace").splitlines()
+    except OSError:
+        return {}
+    headers: dict[str, str] = {}
+    for line in lines:
+        text = line.strip()
+        if not text.startswith("#") or ":" not in text:
+            continue
+        key, value = text[1:].split(":", 1)
+        headers[key.strip()] = value.strip()
+    return headers
+
+
+def summarize_policy_gate(path: Path) -> str:
+    headers = read_policy_headers(path)
+    gate = headers.get("PatchGate") or ""
+    if not gate:
+        return ""
+    requested = headers.get("RequestedPatch") or "-"
+    effective = headers.get("EffectivePatch") or "-"
+    metrics = headers.get("GateMetrics") or ""
+    if "decision=apply_latest" in gate:
+        return f" / gate latest {effective}"
+    if "decision=apply_immediate" in gate:
+        return f" / gate immediate {effective}"
+    if "decision=fallback_all_patches" in gate:
+        return f" / gate fallback {effective} ({metrics})"
+    if "decision=hold" in gate:
+        return f" / gate hold {requested}->{effective} ({metrics})"
+    return f" / gate {gate}"
+
+
 def format_tier_counts(rows: list[dict]) -> str:
     counts = {tier: 0 for tier in POLICY_TIER_SORT}
     for row in rows:
@@ -304,7 +340,7 @@ def summarize_champion_tier_policy(path: Path) -> str:
         return "없음"
     mismatch = sum(1 for row in rows if policy_tier_from_overall(row["overall"]) != row["tier"])
     suffix = "정상" if mismatch == 0 else f"불일치 {mismatch}"
-    return f"{len(rows)}행 {format_tier_counts(rows)} ({suffix})"
+    return f"{len(rows)}행 {format_tier_counts(rows)} ({suffix}){summarize_policy_gate(path)}"
 
 
 def summarize_ai_policy(path: Path) -> str:

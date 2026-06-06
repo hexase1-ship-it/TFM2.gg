@@ -1,18 +1,24 @@
 # AUTO_GENERATED_BY_TFM2_META_DASHBOARD
 # Do not hand-edit unless you intentionally want to override dashboard meta scoring.
-# Generated: 2026-06-06T16:26:00
+# Generated: 2026-06-06T22:26:36
 # Save: C:\Users\hexas\AppData\Roaming\TeamSamoyed\TeamfightManager2\data\save_20260606_010734.data
-# Source: tournament patch 2026.0.0
-# Patch: 2026.0.0
+# Source: tournament all patches
+# Patch: all
 # Scope: tournament
 # Region: all
 # Role: all
 # Model: tfm2gg-meta-v1
 # Preset: classic weights={"draftPressure": 0.16, "lowerPressure": 0.12, "lowerStrength": 0.88, "strength": 0.84}
 # PolicyPresetSource: dashboard setting
-# Sample: early min=5 reason=22 matches
-# WinPrior: mean=50.0 kappa=29.6
-# BaselinePresence: 38.0
+# Sample: early min=5 reason=0 matches
+# SampleVolume: 0.0
+# PatchGate: mode=sampleGate decision=hold_existing_tsv_last_resort source=existing_tsv_last_resort mature=False
+# RequestedPatch: all
+# EffectivePatch: all
+# HoldReason: sample 0/100, eligible 0/29
+# GateMetrics: matches=0.0 min=100 fallback=50 eligible=0/64 required=29
+# WinPrior: mean=50.0 kappa=24.0
+# BaselinePresence: 0.1
 # PolicyKind: championTier
 # OverallSemantic: dashboard_meta_tier_for_in_game_sabcd_no
 # OverallNote: overall is an S/A/B/C/D anchor for the native tier addon; No leaves overall blank and removes the champion from team tier maps.
@@ -22,34 +28,14 @@
 # For No tier, overall is omitted and the native addon removes any existing team tier entry.
 # Non-eligible or low-sample champions are emitted as No with blank overall.
 # champion_id	tier	overall
-shield_bearer	B	62.0
-gambler	B	62.0
-archer	B	62.0
-swordman	C	50.0
-gunner	C	50.0
-pythoness	C	50.0
-fighter	C	50.0
-beast_valtan	C	50.0
-white_mage	C	50.0
-soldier	C	50.0
-guardian_spirit	C	50.0
-siege_breaker	D	35.0
-hunter	D	35.0
-cavalry_knight	D	35.0
-ghost	D	35.0
-ice_mage	D	35.0
-dancer	D	35.0
-executioner	D	35.0
-wind_mage	D	35.0
-test_mod_jhin	No
-test_mod_aatrox	No
 hitman	No
 vampire	No
 dark_mage	No
 illusionist	No
 pyromancer	No
-test_mod_fiddlesticks	No
 bomber	No
+gunner	C	50.0
+executioner	D	35.0
 whip_master	No
 lancer	No
 hammerer	No
@@ -58,21 +44,29 @@ spirit_caller	No
 enchanter	No
 inquisitor	No
 bard	No
+ghost	D	35.0
 chef	No
 ogre	No
 oni	No
 plague_doctor	No
 exorcist	No
+ice_mage	D	35.0
 android	No
 demon	No
+guardian_spirit	C	50.0
+soldier	C	50.0
 priest	No
-test_mod_viktor	No
+hunter	D	35.0
 boomerang_hunter	No
 voodoo_shaman	No
 pole_warrior	No
-test_mod_vayne	No
-test_mod_veigar	No
 lightning_mage	No
+white_mage	C	50.0
+shield_bearer	B	62.0
+beast_valtan	C	50.0
+wind_mage	D	35.0
+dancer	D	35.0
+pythoness	C	50.0
 monk	No
 malphite	No
 magic_knight	No
@@ -80,15 +74,27 @@ druid	No
 dual_blader	No
 poison_dart_hunter	No
 taoist	No
+gambler	B	62.0
 dokkaebi	No
 squirrel	No
 ninja	No
 werewolf	No
 necromancer	No
 knight	No
+cavalry_knight	D	35.0
 shadowmancer	No
+archer	B	62.0
 berserker	No
 clown	No
+siege_breaker	D	35.0
 circus_blade	No
 barrier_magician	No
+fighter	C	50.0
+swordman	C	50.0
 jiangshi	No
+test_mod_viktor	No
+test_mod_veigar	No
+test_mod_vayne	No
+test_mod_jhin	No
+test_mod_fiddlesticks	No
+test_mod_aatrox	No

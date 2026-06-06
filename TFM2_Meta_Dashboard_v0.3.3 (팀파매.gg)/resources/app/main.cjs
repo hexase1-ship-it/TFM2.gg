@@ -31,6 +31,7 @@ let policyIpcRegistered = false;
 
 const POLICY_PRESET_IDS = new Set(["classic", "fearless", "hardFearless"]);
 const FOLLOW_DASHBOARD_POLICY = "followDashboard";
+const TIER_POLICY_GATE_MODES = new Set(["sampleGate", "immediate", "locked"]);
 
 function nowEpoch() {
   return Math.floor(Date.now() / 1000);
@@ -224,11 +225,15 @@ function normalizePolicySettings(input = {}) {
   const addonPolicyPreset = mode === FOLLOW_DASHBOARD_POLICY || POLICY_PRESET_IDS.has(mode)
     ? mode
     : FOLLOW_DASHBOARD_POLICY;
+  const tierPolicyGateMode = TIER_POLICY_GATE_MODES.has(String(existing.tierPolicyGateMode))
+    ? String(existing.tierPolicyGateMode)
+    : "sampleGate";
   const effectivePreset = addonPolicyPreset === FOLLOW_DASHBOARD_POLICY
     ? dashboardPreset
     : addonPolicyPreset;
   return {
     addonPolicyPreset,
+    tierPolicyGateMode,
     dashboardPreset,
     effectivePreset,
     lastAppliedPreset: POLICY_PRESET_IDS.has(String(existing.lastAppliedPreset))

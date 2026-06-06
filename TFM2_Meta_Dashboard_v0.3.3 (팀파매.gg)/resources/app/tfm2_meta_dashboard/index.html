@@ -4,7 +4,7 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>TFM2 Meta Dashboard</title>
-    <link rel="stylesheet" href="styles.css?v=20260605-policy-ui" />
+    <link rel="stylesheet" href="styles.css?v=20260606-policy-gate-layout" />
   </head>
   <body>
     <aside class="sidebar">
@@ -83,6 +83,25 @@
             >적용</button>
             <span id="addonPolicyStatus" class="addon-policy-status"></span>
           </div>
+          <div class="tier-policy-gate" id="tierPolicyGateBox">
+            <div class="tier-policy-gate-head">
+              <span>인게임 티어 적용 방식</span>
+              <div
+                id="tierPolicyGateModeSelect"
+                class="addon-policy-select tier-policy-select"
+                role="button"
+                tabindex="0"
+                aria-haspopup="listbox"
+                aria-expanded="false"
+                aria-label="인게임 티어 적용 방식"
+                title="인게임 티어 적용 방식"
+              >
+                <span id="tierPolicyGateModeLabel"></span>
+                <div id="tierPolicyGateModeMenu" class="addon-policy-menu tier-policy-menu" role="listbox" hidden></div>
+              </div>
+            </div>
+            <p id="tierPolicyGateDescription"></p>
+          </div>
           <select id="sampleModeSelect" class="select" title="표본 기준"></select>
           <select id="tournamentSplitSelect" class="select" title="지역/세부 범위"></select>
           <select id="patchSelect" class="select"></select>
@@ -119,6 +138,6 @@
     </main>
 
     <script src="data/meta-data.js?v=20260604-solo-honey"></script>
-    <script src="app.js?v=20260605-policy-ui"></script>
+    <script src="app.js?v=20260606-policy-gate-source"></script>
   </body>
 </html>

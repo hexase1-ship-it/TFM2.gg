@@ -1,8 +1,8 @@
 # AUTO_GENERATED_BY_TFM2_META_DASHBOARD
 # Do not hand-edit unless you intentionally want to override dashboard AI draft mapping.
-# Generated: 2026-06-06T16:26:00
-# Source: overall patch 2026.0.0
-# Patch: 2026.0.0
+# Generated: 2026-06-06T22:26:36
+# Source: overall all patches
+# Patch: all
 # Scope: overall
 # Preset: classic
 # MapKind: aiCandidateMap
@@ -74,7 +74,7 @@
 57	guardian_spirit	base	verified_base
 58	hunter	base	verified_base
 59	circus_blade	base	verified_base
-60	oni	active_external	conditional_external
-61	squirrel	active_external	conditional_external
-62	beast_valtan	active_external	conditional_external
-63	malphite	active_external	conditional_external
+60	malphite	active_external	conditional_external
+61	beast_valtan	active_external	conditional_external
+62	oni	active_external	conditional_external
+63	squirrel	active_external	conditional_external

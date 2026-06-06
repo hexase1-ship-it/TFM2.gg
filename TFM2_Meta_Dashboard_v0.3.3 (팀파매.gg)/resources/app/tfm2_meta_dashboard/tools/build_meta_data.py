@@ -24,6 +24,8 @@ CORE_ITEM_BUILDS_OUT = DASHBOARD / "data" / "core-item-builds.json"
 CORE_ITEM_BUILDS_MOD_OUT = ROOT / "mods" / "tfm2_meta_item_delegate" / "core-item-builds.json"
 CORE_ITEM_BUILDS_MOD_DATA_OUT = ROOT / "mods" / "tfm2_meta_item_delegate" / "data" / "core-item-builds.json"
 POLICY_EXPORT_DIR = DASHBOARD / "data" / "policy_exports"
+POLICY_HISTORY_DIR = POLICY_EXPORT_DIR / "history"
+POLICY_HISTORY_INDEX = POLICY_EXPORT_DIR / "policy-history.json"
 CHAMPION_TIER_POLICY_OUT = POLICY_EXPORT_DIR / "champion_tier_policy.tsv"
 AI_CHAMPION_POLICY_OUT = POLICY_EXPORT_DIR / "ai_champion_policy.tsv"
 CHAMPION_TIER_POLICY_MOD_OUT = ROOT / "mods" / "tfm2_meta_champion_tiers" / "champion_tier_policy.tsv"
@@ -70,6 +72,13 @@ POLICY_TIER_MAP = {"OP": "S", "1": "A", "2": "B", "3": "C", "4": "D", "-": "No"}
 POLICY_TIER_SORT = {"S": 6, "A": 5, "B": 4, "C": 3, "D": 2, "No": 1}
 TIER_POLICY_OVERALL_ANCHORS = {"S": 90.0, "A": 75.0, "B": 62.0, "C": 50.0, "D": 35.0}
 AI_POLICY_OVERALL_ANCHORS = {"S": 80.0, "A": 70.0, "B": 60.0, "C": 50.0, "D": 40.0}
+POLICY_GATE_MODES = {"sampleGate", "immediate", "locked"}
+DEFAULT_TIER_POLICY_GATE = {
+    "mode": "sampleGate",
+    "minMatches": 100,
+    "fallbackMatches": 50,
+    "minEligibleRatio": 0.45,
+}
 BASE_CANDIDATE_ORDER = [
     "fighter",
     "knight",
@@ -226,6 +235,58 @@ def load_policy_settings():
     except (OSError, json.JSONDecodeError):
         return {}
     return data if isinstance(data, dict) else {}
+
+
+def int_setting(value, fallback, minimum=0):
+    try:
+        number = int(value)
+    except (TypeError, ValueError):
+        return fallback
+    return max(minimum, number)
+
+
+def float_setting(value, fallback, minimum=0.0, maximum=None):
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return fallback
+    if not math.isfinite(number):
+        return fallback
+    number = max(minimum, number)
+    if maximum is not None:
+        number = min(maximum, number)
+    return number
+
+
+def tier_policy_gate_settings():
+    settings = load_policy_settings()
+    mode = (
+        os.environ.get("TFM2_TIER_POLICY_GATE_MODE")
+        or settings.get("tierPolicyGateMode")
+        or DEFAULT_TIER_POLICY_GATE["mode"]
+    )
+    mode = str(mode).strip()
+    if mode not in POLICY_GATE_MODES:
+        mode = DEFAULT_TIER_POLICY_GATE["mode"]
+    return {
+        "mode": mode,
+        "minMatches": int_setting(
+            os.environ.get("TFM2_TIER_POLICY_MIN_MATCHES") or settings.get("tierPolicyMinMatches"),
+            DEFAULT_TIER_POLICY_GATE["minMatches"],
+            1,
+        ),
+        "fallbackMatches": int_setting(
+            os.environ.get("TFM2_TIER_POLICY_FALLBACK_MATCHES") or settings.get("tierPolicyFallbackMatches"),
+            DEFAULT_TIER_POLICY_GATE["fallbackMatches"],
+            1,
+        ),
+        "minEligibleRatio": float_setting(
+            os.environ.get("TFM2_TIER_POLICY_MIN_ELIGIBLE_RATIO") or settings.get("tierPolicyMinEligibleRatio"),
+            DEFAULT_TIER_POLICY_GATE["minEligibleRatio"],
+            0.0,
+            1.0,
+        ),
+    }
 
 
 def load_json_file(path, default=None):
@@ -1697,6 +1758,7 @@ def build_policy_exports(
             "lowerPressure": preset.get("lowerPressureWeight"),
         },
         "sample": sample_info,
+        "sampleVolume": round1(policy_sample_volume(stats)),
         "winPrior": {
             "mean": round1((context.get("winPrior", {}).get("mean") or 0.5) * 100),
             "kappa": round1(context.get("winPrior", {}).get("kappa") or 0),
@@ -1704,6 +1766,7 @@ def build_policy_exports(
         "baselinePresence": round1((context.get("exposure", {}).get("presence") or 0) * 100),
         "eligibleCount": len(eligible),
         "rowCount": len(rows),
+        "activeRowCount": max(0, len(rows) - len(cleanup_champion_ids)),
         "cleanupRowCount": len(cleanup_champion_ids),
         "policyProfiles": {
             "championTier": {
@@ -1730,6 +1793,7 @@ def build_policy_exports(
 def render_policy_tsv(policy, profile_key):
     meta = policy["metadata"]
     profile = (meta.get("policyProfiles") or {}).get(profile_key) or {}
+    gate = meta.get("gate") if isinstance(meta.get("gate"), dict) else {}
     tier_field = profile.get("tierField") or "tier"
     overall_field = profile.get("overallField") or "tierOverall"
     candidate_index_field = profile.get("candidateIndexField")
@@ -1763,6 +1827,12 @@ def render_policy_tsv(policy, profile_key):
         f"# Preset: {meta.get('preset')} weights={json.dumps(meta.get('weights'), sort_keys=True)}",
         f"# PolicyPresetSource: {meta.get('presetSource')}",
         f"# Sample: {meta.get('sample', {}).get('mode')} min={meta.get('sample', {}).get('minSample')} reason={meta.get('sample', {}).get('reason')}",
+        f"# SampleVolume: {meta.get('sampleVolume')}",
+        f"# PatchGate: mode={gate.get('mode') or '-'} decision={gate.get('decision') or '-'} source={gate.get('sourceKind') or '-'} mature={gate.get('mature')}",
+        f"# RequestedPatch: {gate.get('requestedPatch') or meta.get('patch')}",
+        f"# EffectivePatch: {gate.get('effectivePatch') or meta.get('patch')}",
+        f"# HoldReason: {gate.get('reason') or '-'}",
+        f"# GateMetrics: matches={gate.get('sampleVolume') or meta.get('sampleVolume')} min={gate.get('minMatches') or '-'} fallback={gate.get('fallbackMatches') or '-'} eligible={gate.get('eligibleCount') or meta.get('eligibleCount')}/{gate.get('activeRowCount') or meta.get('activeRowCount')} required={gate.get('requiredEligibleCount') or '-'}",
         f"# WinPrior: mean={meta.get('winPrior', {}).get('mean')} kappa={meta.get('winPrior', {}).get('kappa')}",
         f"# BaselinePresence: {meta.get('baselinePresence')}",
         f"# PolicyKind: {profile_key}",
@@ -1794,6 +1864,321 @@ def render_policy_tsv(policy, profile_key):
         else:
             lines.append(f"{row['championId']}\t{tier}\t{round1(overall):.1f}{suffix}")
     return "\n".join(lines) + "\n"
+
+
+def policy_history_key(policy):
+    meta = policy.get("metadata") or {}
+    preset = str(meta.get("preset") or "classic")
+    scope = str(meta.get("scope") or "tournament")
+    return f"championTier|{scope}|{preset}"
+
+
+def safe_file_part(value):
+    text = str(value or "unknown")
+    text = re.sub(r"[^A-Za-z0-9_.-]+", "_", text).strip("._")
+    return text or "unknown"
+
+
+def policy_gate_metrics(policy, settings=None):
+    settings = settings or tier_policy_gate_settings()
+    meta = policy.get("metadata") or {}
+    sample_volume = finite_float(meta.get("sampleVolume"), 0)
+    eligible_count = int(meta.get("eligibleCount") or 0)
+    active_count = int(meta.get("activeRowCount") or 0)
+    if active_count <= 0:
+        active_count = max(0, int(meta.get("rowCount") or 0) - int(meta.get("cleanupRowCount") or 0))
+    eligible_ratio = eligible_count / active_count if active_count else 0
+    required_eligible = math.ceil(active_count * float(settings.get("minEligibleRatio") or 0))
+    min_matches = int(settings.get("minMatches") or DEFAULT_TIER_POLICY_GATE["minMatches"])
+    fallback_matches = int(settings.get("fallbackMatches") or DEFAULT_TIER_POLICY_GATE["fallbackMatches"])
+    mature_by_matches = sample_volume >= min_matches
+    mature_by_coverage = sample_volume >= fallback_matches and eligible_count >= required_eligible
+    mature = mature_by_matches or mature_by_coverage
+    if mature_by_matches:
+        reason = f"match_count {sample_volume:g}/{min_matches}"
+    elif mature_by_coverage:
+        reason = f"coverage {sample_volume:g}/{fallback_matches}, eligible {eligible_count}/{required_eligible}"
+    else:
+        reason = f"sample {sample_volume:g}/{min_matches}, eligible {eligible_count}/{required_eligible}"
+    return {
+        "sampleVolume": round1(sample_volume),
+        "eligibleCount": eligible_count,
+        "activeRowCount": active_count,
+        "eligibleRatio": round1(eligible_ratio * 100),
+        "requiredEligibleCount": required_eligible,
+        "minMatches": min_matches,
+        "fallbackMatches": fallback_matches,
+        "minEligibleRatio": round1(float(settings.get("minEligibleRatio") or 0) * 100),
+        "mature": mature,
+        "reason": reason,
+    }
+
+
+def gate_metadata(settings, decision, reason, candidate_policy, effective_policy, source_kind, metrics=None):
+    candidate_meta = candidate_policy.get("metadata") or {}
+    effective_meta = effective_policy.get("metadata") or {}
+    metrics = metrics or policy_gate_metrics(candidate_policy, settings)
+    return {
+        "mode": settings.get("mode"),
+        "decision": decision,
+        "sourceKind": source_kind,
+        "reason": reason,
+        "requestedPatch": candidate_meta.get("patch"),
+        "requestedSource": candidate_meta.get("source"),
+        "effectivePatch": effective_meta.get("patch"),
+        "effectiveSource": effective_meta.get("source"),
+        "sampleVolume": metrics.get("sampleVolume"),
+        "eligibleCount": metrics.get("eligibleCount"),
+        "activeRowCount": metrics.get("activeRowCount"),
+        "eligibleRatio": metrics.get("eligibleRatio"),
+        "requiredEligibleCount": metrics.get("requiredEligibleCount"),
+        "minMatches": metrics.get("minMatches"),
+        "fallbackMatches": metrics.get("fallbackMatches"),
+        "minEligibleRatio": metrics.get("minEligibleRatio"),
+        "mature": metrics.get("mature"),
+    }
+
+
+def copy_policy_with_gate(policy, gate):
+    result = json.loads(json.dumps(policy, ensure_ascii=False))
+    result.setdefault("metadata", {})["gate"] = gate
+    return result
+
+
+def load_policy_history_index():
+    data = load_json_file(POLICY_HISTORY_INDEX, {})
+    return data if isinstance(data, dict) else {}
+
+
+def write_json_atomic(path: Path, payload):
+    text = json.dumps(payload, ensure_ascii=False, indent=2) + "\n"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(path.name + ".tmp")
+    tmp.write_text(text, encoding="utf-8")
+    tmp.replace(path)
+
+
+def archive_stable_champion_tier_policy(policy):
+    meta = policy.get("metadata") or {}
+    patch = safe_file_part(meta.get("patch") or "all")
+    preset = safe_file_part(meta.get("preset") or "classic")
+    scope = safe_file_part(meta.get("scope") or "tournament")
+    stem = f"champion_tier_policy.{scope}.{patch}.{preset}"
+    json_path = POLICY_HISTORY_DIR / f"{stem}.json"
+    tsv_path = POLICY_HISTORY_DIR / f"{stem}.tsv"
+    archive_policy = json.loads(json.dumps(policy, ensure_ascii=False))
+    archive_policy.setdefault("metadata", {})["archivedAt"] = datetime.now().isoformat(timespec="seconds")
+    write_json_atomic(json_path, archive_policy)
+    tsv_path.parent.mkdir(parents=True, exist_ok=True)
+    tsv_path.write_text(render_policy_tsv(archive_policy, "championTier"), encoding="utf-8")
+
+    index = load_policy_history_index()
+    index.setdefault("version", 1)
+    index.setdefault("championTier", {})[policy_history_key(policy)] = {
+        "json": str(json_path),
+        "tsv": str(tsv_path),
+        "patch": meta.get("patch"),
+        "source": meta.get("source"),
+        "scope": meta.get("scope"),
+        "preset": meta.get("preset"),
+        "generatedAt": meta.get("generatedAt"),
+        "archivedAt": archive_policy["metadata"]["archivedAt"],
+    }
+    write_json_atomic(POLICY_HISTORY_INDEX, index)
+
+
+def load_last_stable_champion_tier_policy(candidate_policy):
+    entry = (load_policy_history_index().get("championTier") or {}).get(policy_history_key(candidate_policy))
+    if not isinstance(entry, dict):
+        return None
+    json_path = Path(entry.get("json") or "")
+    if not json_path.is_absolute():
+        json_path = POLICY_EXPORT_DIR / json_path
+    policy = load_json_file(json_path, None)
+    if isinstance(policy, dict) and isinstance(policy.get("rows"), list):
+        return policy
+    return None
+
+
+def load_existing_champion_tier_tsv(path: Path):
+    if not path.exists():
+        return None
+    try:
+        lines = path.read_text(encoding="utf-8-sig", errors="replace").splitlines()
+    except OSError:
+        return None
+    meta = {"source": f"existing {path.name}", "patch": "unknown", "scope": "tournament"}
+    rows = []
+    for line in lines:
+        text = line.strip()
+        if not text:
+            continue
+        if text.startswith("#"):
+            if ":" in text:
+                key, value = text[1:].split(":", 1)
+                key = key.strip()
+                value = value.strip()
+                if key == "Source":
+                    meta["source"] = value
+                elif key == "Patch":
+                    meta["patch"] = value
+                elif key == "Scope":
+                    meta["scope"] = value
+                elif key == "Preset":
+                    meta["preset"] = value.split()[0] if value else None
+            continue
+        parts = text.split("\t")
+        if len(parts) < 2:
+            continue
+        tier = parts[1].strip() or "No"
+        overall = None
+        if len(parts) >= 3 and parts[2].strip():
+            try:
+                overall = float(parts[2])
+            except ValueError:
+                overall = None
+        rows.append(
+            {
+                "championId": parts[0].strip(),
+                "tier": tier,
+                "tierOverall": overall,
+                "eligible": tier != "No",
+            }
+        )
+    if not rows:
+        return None
+    return {"metadata": meta, "rows": rows}
+
+
+def reconcile_held_champion_tier_policy(current_policy, held_policy, reason, source_kind):
+    current = json.loads(json.dumps(current_policy, ensure_ascii=False))
+    held_meta = held_policy.get("metadata") or {}
+    held_rows = {
+        str(row.get("championId") or ""): row
+        for row in held_policy.get("rows") or []
+        if row.get("championId")
+    }
+    reconciled = []
+    for row in current.get("rows") or []:
+        champion_id = str(row.get("championId") or "")
+        cleanup_row = row.get("reason") == "inactive_external_champion_mod_cleanup"
+        held = held_rows.get(champion_id)
+        next_row = dict(row)
+        if cleanup_row:
+            next_row.update({
+                "tier": "No",
+                "tierOverall": None,
+                "eligible": False,
+                "reason": "inactive_external_champion_mod_cleanup",
+            })
+        elif held:
+            tier = str(held.get("tier") or "No")
+            if tier not in POLICY_TIER_SORT:
+                tier = "No"
+            overall = held.get("tierOverall")
+            if tier == "No":
+                overall = None
+            elif overall is None:
+                overall = tier_policy_overall(tier, True)
+            next_row.update({
+                "tier": tier,
+                "tierOverall": round1(overall) if overall is not None else None,
+                "eligible": tier != "No",
+                "reason": f"held_{source_kind}",
+            })
+        else:
+            next_row.update({
+                "tier": "No",
+                "tierOverall": None,
+                "eligible": False,
+                "reason": "new_champion_without_stable_policy",
+            })
+        reconciled.append(next_row)
+    current["rows"] = reconciled
+    current.setdefault("metadata", {})["source"] = held_meta.get("source") or current["metadata"].get("source")
+    current["metadata"]["patch"] = held_meta.get("patch") or current["metadata"].get("patch")
+    current["metadata"]["scope"] = held_meta.get("scope") or current["metadata"].get("scope")
+    if held_meta.get("preset"):
+        current["metadata"]["preset"] = held_meta.get("preset")
+    current["metadata"]["heldPolicyReason"] = reason
+    current["metadata"]["heldPolicySourceKind"] = source_kind
+    return current
+
+
+def apply_champion_tier_policy_gate(candidate_policy, fallback_builder=None):
+    settings = tier_policy_gate_settings()
+    metrics = policy_gate_metrics(candidate_policy, settings)
+    candidate_meta = candidate_policy.get("metadata") or {}
+    mode = settings.get("mode")
+
+    if mode == "immediate":
+        decision = "apply_immediate"
+        reason = "manual immediate mode"
+        gated = copy_policy_with_gate(
+            candidate_policy,
+            gate_metadata(settings, decision, reason, candidate_policy, candidate_policy, "candidate", metrics),
+        )
+        if metrics.get("mature"):
+            archive_stable_champion_tier_policy(gated)
+        return gated
+
+    if metrics.get("mature") and mode != "locked":
+        decision = "apply_latest"
+        reason = metrics.get("reason") or "latest policy is mature"
+        gated = copy_policy_with_gate(
+            candidate_policy,
+            gate_metadata(settings, decision, reason, candidate_policy, candidate_policy, "candidate", metrics),
+        )
+        archive_stable_champion_tier_policy(gated)
+        return gated
+
+    hold_reason = metrics.get("reason") or "latest policy sample gate not met"
+    held = load_last_stable_champion_tier_policy(candidate_policy)
+    if held:
+        effective = reconcile_held_champion_tier_policy(candidate_policy, held, hold_reason, "history")
+        decision = "hold_previous"
+        return copy_policy_with_gate(
+            effective,
+            gate_metadata(settings, decision, hold_reason, candidate_policy, effective, "history", metrics),
+        )
+
+    existing = load_existing_champion_tier_tsv(CHAMPION_TIER_POLICY_OUT)
+    existing_patch = (existing.get("metadata") or {}).get("patch") if existing else None
+    if existing and existing_patch and existing_patch != candidate_meta.get("patch"):
+        effective = reconcile_held_champion_tier_policy(candidate_policy, existing, hold_reason, "existing_tsv")
+        decision = "hold_existing_tsv"
+        return copy_policy_with_gate(
+            effective,
+            gate_metadata(settings, decision, hold_reason, candidate_policy, effective, "existing_tsv", metrics),
+        )
+
+    fallback = fallback_builder() if fallback_builder else None
+    if fallback:
+        fallback_metrics = policy_gate_metrics(fallback, settings)
+        decision = "fallback_all_patches"
+        reason = f"{hold_reason}; no previous stable patch policy"
+        effective = copy_policy_with_gate(
+            fallback,
+            gate_metadata(settings, decision, reason, candidate_policy, fallback, "fallback_all_patches", metrics),
+        )
+        if fallback_metrics.get("mature"):
+            archive_stable_champion_tier_policy(effective)
+        return effective
+
+    if existing:
+        effective = reconcile_held_champion_tier_policy(candidate_policy, existing, hold_reason, "existing_tsv_last_resort")
+        decision = "hold_existing_tsv_last_resort"
+        return copy_policy_with_gate(
+            effective,
+            gate_metadata(settings, decision, hold_reason, candidate_policy, effective, "existing_tsv_last_resort", metrics),
+        )
+
+    decision = "apply_without_history"
+    reason = f"{hold_reason}; no previous policy source exists"
+    return copy_policy_with_gate(
+        candidate_policy,
+        gate_metadata(settings, decision, reason, candidate_policy, candidate_policy, "candidate_no_history", metrics),
+    )
 
 
 def render_ai_candidate_map_tsv(policy):
@@ -4982,17 +5367,36 @@ def build_policy_exports_from_payload(payload, generated_at=None):
         patch_versions,
         scope="overall",
     )
-    champion_tier_policy_exports = build_policy_exports(
-        champion_tier_champions,
+
+    def build_tier_policy_for_stats(stats, patch_key, source_label):
+        policy = build_policy_exports(
+            champion_tier_champions,
+            stats,
+            generated_at,
+            save_path,
+            patch_key,
+            source_label,
+            replay_date_status,
+            score_model_spec,
+            scope="tournament",
+            cleanup_champion_ids=inactive_external_ids,
+        )
+        policy["metadata"]["activeExternalChampionCount"] = policy_split["activeExternalCount"]
+        policy["metadata"]["inactiveExternalCleanupCount"] = policy_split["inactiveExternalCount"]
+        return policy
+
+    champion_tier_policy_exports = build_tier_policy_for_stats(
         tier_policy_stats,
-        generated_at,
-        save_path,
         tier_policy_patch,
         tier_policy_source,
-        replay_date_status,
-        score_model_spec,
-        scope="tournament",
-        cleanup_champion_ids=inactive_external_ids,
+    )
+    champion_tier_policy_exports = apply_champion_tier_policy_gate(
+        champion_tier_policy_exports,
+        None if tier_policy_patch == "all" else lambda: build_tier_policy_for_stats(
+            tournament_stats,
+            "all",
+            "tournament all patches",
+        ),
     )
     ai_champion_policy_exports = build_policy_exports(
         ai_champions,
@@ -5005,8 +5409,6 @@ def build_policy_exports_from_payload(payload, generated_at=None):
         score_model_spec,
         scope="overall",
     )
-    champion_tier_policy_exports["metadata"]["activeExternalChampionCount"] = policy_split["activeExternalCount"]
-    champion_tier_policy_exports["metadata"]["inactiveExternalCleanupCount"] = policy_split["inactiveExternalCount"]
     ai_champion_policy_exports["metadata"]["activeExternalChampionCount"] = policy_split["activeExternalCount"]
     ai_champion_policy_exports["metadata"]["customCandidatePolicy"] = "candidate_map_conditional_fail_closed"
     return champion_tier_policy_exports, ai_champion_policy_exports
@@ -5340,17 +5742,36 @@ def main():
         patch_versions,
         scope="overall",
     )
-    champion_tier_policy_exports = build_policy_exports(
-        policy_split["championTierChampions"],
+
+    def build_tier_policy_for_stats(stats, patch_key, source_label):
+        policy = build_policy_exports(
+            policy_split["championTierChampions"],
+            stats,
+            generated_at,
+            save_path,
+            patch_key,
+            source_label,
+            replay_date_status,
+            score_model_spec,
+            scope="tournament",
+            cleanup_champion_ids=policy_split["inactiveExternalIds"],
+        )
+        policy["metadata"]["activeExternalChampionCount"] = policy_split["activeExternalCount"]
+        policy["metadata"]["inactiveExternalCleanupCount"] = policy_split["inactiveExternalCount"]
+        return policy
+
+    champion_tier_policy_exports = build_tier_policy_for_stats(
         tier_policy_stats,
-        generated_at,
-        save_path,
         tier_policy_patch,
         tier_policy_source,
-        replay_date_status,
-        score_model_spec,
-        scope="tournament",
-        cleanup_champion_ids=policy_split["inactiveExternalIds"],
+    )
+    champion_tier_policy_exports = apply_champion_tier_policy_gate(
+        champion_tier_policy_exports,
+        None if tier_policy_patch == "all" else lambda: build_tier_policy_for_stats(
+            tournament_stats,
+            "all",
+            "tournament all patches",
+        ),
     )
     ai_champion_policy_exports = build_policy_exports(
         policy_split["aiChampions"],
@@ -5363,8 +5784,6 @@ def main():
         score_model_spec,
         scope="overall",
     )
-    champion_tier_policy_exports["metadata"]["activeExternalChampionCount"] = policy_split["activeExternalCount"]
-    champion_tier_policy_exports["metadata"]["inactiveExternalCleanupCount"] = policy_split["inactiveExternalCount"]
     ai_champion_policy_exports["metadata"]["activeExternalChampionCount"] = policy_split["activeExternalCount"]
     ai_champion_policy_exports["metadata"]["customCandidatePolicy"] = "candidate_map_conditional_fail_closed"
     policy_export_status = write_policy_exports(champion_tier_policy_exports, ai_champion_policy_exports)

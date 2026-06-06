@@ -1,18 +1,24 @@
 # AUTO_GENERATED_BY_TFM2_META_DASHBOARD
 # Do not hand-edit unless you intentionally want to override dashboard meta scoring.
-# Generated: 2026-06-06T16:26:00
+# Generated: 2026-06-06T22:26:36
 # Save: C:\Users\hexas\AppData\Roaming\TeamSamoyed\TeamfightManager2\data\save_20260606_010734.data
-# Source: overall patch 2026.0.0
-# Patch: 2026.0.0
+# Source: overall all patches
+# Patch: all
 # Scope: overall
 # Region: all
 # Role: all
 # Model: tfm2gg-meta-v1
 # Preset: classic weights={"draftPressure": 0.16, "lowerPressure": 0.12, "lowerStrength": 0.88, "strength": 0.84}
 # PolicyPresetSource: dashboard setting
-# Sample: early min=5 reason=77 matches
-# WinPrior: mean=50.0 kappa=50.0
-# BaselinePresence: 24.1
+# Sample: early min=5 reason=0 matches
+# SampleVolume: 0.0
+# PatchGate: mode=- decision=- source=- mature=None
+# RequestedPatch: all
+# EffectivePatch: all
+# HoldReason: -
+# GateMetrics: matches=0.0 min=- fallback=- eligible=0/64 required=-
+# WinPrior: mean=50.0 kappa=24.0
+# BaselinePresence: 0.1
 # PolicyKind: aiChampion
 # OverallSemantic: ai_bias_scaled_from_meta_tier
 # OverallNote: overall is scaled for AI draft bias so the native addon has a visible but capped effect.
@@ -22,67 +28,67 @@
 # For No tier, overall is omitted and the native addon removes any existing team tier entry.
 # Non-eligible or low-sample champions are emitted as neutral C/50.0.
 # champion_id	tier	overall	candidate_index
-malphite	A	71.4	63
-swordman	A	71.2	2
-gambler	B	60.5	21
-pythoness	B	60.4	6
-demon	B	60.4	23
-archer	B	60.3	3
-bomber	B	60.2	51
-android	C	50.0	48
-soldier	C	50.0	4
-shield_bearer	C	49.8	28
-pyromancer	C	49.8	8
-beast_valtan	C	49.8	62
-monk	C	49.7	7
-gunner	C	49.7	18
-circus_blade	C	49.7	59
-poison_dart_hunter	C	49.7	44
-dual_blader	C	49.6	16
-barrier_magician	C	49.6	34
-hunter	C	49.6	58
-cavalry_knight	C	49.5	17
-illusionist	C	49.5	41
-fighter	C	49.2	0
-whip_master	C	49.2	29
-siege_breaker	C	49.1	47
-ice_mage	D	39.0	9
-guardian_spirit	D	38.9	57
-executioner	D	38.8	13
-lancer	D	38.7	14
-white_mage	D	38.6	53
-ghost	D	38.5	40
-shadowmancer	D	37.9	45
-dancer	D	37.8	37
-squirrel	D	37.8	61
-wind_mage	D	37.6	54
-oni	D	37.5	60
 hitman	C	50.0	56
 vampire	C	50.0	24
 dark_mage	C	50.0	38
+illusionist	C	50.0	41
+pyromancer	C	50.0	8
+bomber	C	50.0	51
+gunner	C	50.0	18
+executioner	C	50.0	13
+whip_master	C	50.0	29
+lancer	C	50.0	14
 hammerer	C	50.0	22
 prisoner	C	50.0	50
 spirit_caller	C	50.0	25
 enchanter	C	50.0	55
 inquisitor	C	50.0	27
 bard	C	50.0	33
+ghost	C	50.0	40
 chef	C	50.0	35
 ogre	C	50.0	15
+oni	C	50.0	62
 plague_doctor	C	50.0	43
 exorcist	C	50.0	39
+ice_mage	C	50.0	9
+android	C	50.0	48
+demon	C	50.0	23
+guardian_spirit	C	50.0	57
+soldier	C	50.0	4
 priest	C	50.0	5
+hunter	C	50.0	58
 boomerang_hunter	C	50.0	26
 voodoo_shaman	C	50.0	52
 pole_warrior	C	50.0	19
 lightning_mage	C	50.0	42
+white_mage	C	50.0	53
+shield_bearer	C	50.0	28
+beast_valtan	C	50.0	61
+wind_mage	C	50.0	54
+dancer	C	50.0	37
+pythoness	C	50.0	6
+monk	C	50.0	7
+malphite	C	50.0	60
 magic_knight	C	50.0	11
 druid	C	50.0	49
+dual_blader	C	50.0	16
+poison_dart_hunter	C	50.0	44
 taoist	C	50.0	46
+gambler	C	50.0	21
 dokkaebi	C	50.0	31
+squirrel	C	50.0	63
 ninja	C	50.0	10
 werewolf	C	50.0	30
 necromancer	C	50.0	32
 knight	C	50.0	1
+cavalry_knight	C	50.0	17
+shadowmancer	C	50.0	45
+archer	C	50.0	3
 berserker	C	50.0	12
 clown	C	50.0	36
+siege_breaker	C	50.0	47
+circus_blade	C	50.0	59
+barrier_magician	C	50.0	34
+fighter	C	50.0	0
+swordman	C	50.0	2
 jiangshi	C	50.0	20
