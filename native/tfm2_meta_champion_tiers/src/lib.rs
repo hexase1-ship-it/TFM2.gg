@@ -47,11 +47,23 @@ impl ModExtension for MetaTierClient {
             apply_policy_to_scene(scene, "client_post_update")
         }));
     }
+
+    fn pre_render(
+        &self,
+        scene: &Scene,
+        _ui: &GameUI,
+        _assets: &Assets,
+        _state: &mut RenderState,
+    ) {
+        let _ = catch_unwind(AssertUnwindSafe(|| {
+            apply_policy_to_scene(scene, "client_pre_render")
+        }));
+    }
 }
 
 impl ModServerExtension for MetaTierServer {}
 
-fn apply_policy_to_scene(scene: &mut Scene, source_label: &str) {
+fn apply_policy_to_scene(scene: &Scene, source_label: &str) {
     let Scene::InGame { data } = scene else {
         return;
     };
