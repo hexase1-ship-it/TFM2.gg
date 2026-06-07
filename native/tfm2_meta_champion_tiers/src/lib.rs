@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::panic::{catch_unwind, AssertUnwindSafe};
@@ -15,6 +15,7 @@ const POLICY_FILE_NAME: &str = "champion_tier_policy.tsv";
 static POLICY_CACHE: OnceLock<Mutex<PolicyCache>> = OnceLock::new();
 static LAST_APPLY: OnceLock<Mutex<Option<String>>> = OnceLock::new();
 static LAST_ERROR: OnceLock<Mutex<Option<String>>> = OnceLock::new();
+static ONCE_LOGS: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
 
 #[derive(Clone)]
 struct TierPolicy {
@@ -71,6 +72,12 @@ fn apply_policy_to_scene(scene: &Scene, source_label: &str) {
         return;
     };
     let Ok(mut db) = data.db.try_borrow_mut() else {
+        if source_label == "client_pre_render" {
+            log_once(
+                "client_pre_render_db_busy",
+                "source=client_pre_render reason=db_borrow_busy",
+            );
+        }
         return;
     };
     let mut teams = 0usize;
@@ -112,6 +119,14 @@ fn apply_policy_to_scene(scene: &Scene, source_label: &str) {
         );
         log_line(&line);
         write_latest_snapshot(&policy, &line);
+    } else if source_label == "client_pre_render" {
+        log_once(
+            "client_pre_render_seen",
+            &format!(
+                "source=client_pre_render reason=seen teams={teams} policy_rows={} changed={changed} already_matched={already_matched} missing={missing} mismatched={mismatched}",
+                policy.rows.len(),
+            ),
+        );
     }
 }
 
@@ -336,6 +351,16 @@ fn clear_last_error() {
             *guard = None;
         }
     }
+}
+
+fn log_once(key: &str, message: &str) {
+    let slot = ONCE_LOGS.get_or_init(|| Mutex::new(HashSet::new()));
+    if let Ok(mut guard) = slot.lock() {
+        if !guard.insert(key.to_string()) {
+            return;
+        }
+    }
+    log_line(message);
 }
 
 fn remember_apply_signature(signature: String) -> bool {

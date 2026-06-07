@@ -1,0 +1,15 @@
+{
+  "version": 1,
+  "championTier": {
+    "championTier|tournament|fearless": {
+      "json": "history/champion_tier_policy.tournament.2026.1.0.fearless.json",
+      "tsv": "history/champion_tier_policy.tournament.2026.1.0.fearless.tsv",
+      "patch": "2026.1.0",
+      "source": "tournament patch 2026.1.0",
+      "scope": "tournament",
+      "preset": "fearless",
+      "generatedAt": "2026-06-07T12:44:02",
+      "archivedAt": "2026-06-07T12:44:02"
+    }
+  }
+}

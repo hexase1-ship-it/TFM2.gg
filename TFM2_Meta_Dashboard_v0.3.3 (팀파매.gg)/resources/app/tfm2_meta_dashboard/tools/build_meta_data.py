@@ -1884,21 +1884,27 @@ def safe_file_part(value):
 def policy_gate_metrics(policy, settings=None):
     settings = settings or tier_policy_gate_settings()
     meta = policy.get("metadata") or {}
+    rows = policy.get("rows") if isinstance(policy.get("rows"), list) else []
     sample_volume = finite_float(meta.get("sampleVolume"), 0)
     eligible_count = int(meta.get("eligibleCount") or 0)
     active_count = int(meta.get("activeRowCount") or 0)
+    if eligible_count <= 0 and rows:
+        eligible_count = sum(1 for row in rows if str(row.get("tier") or "No") != "No")
     if active_count <= 0:
         active_count = max(0, int(meta.get("rowCount") or 0) - int(meta.get("cleanupRowCount") or 0))
+    if active_count <= 0 and rows:
+        active_count = len(rows)
     eligible_ratio = eligible_count / active_count if active_count else 0
     required_eligible = math.ceil(active_count * float(settings.get("minEligibleRatio") or 0))
     min_matches = int(settings.get("minMatches") or DEFAULT_TIER_POLICY_GATE["minMatches"])
     fallback_matches = int(settings.get("fallbackMatches") or DEFAULT_TIER_POLICY_GATE["fallbackMatches"])
-    mature_by_matches = sample_volume >= min_matches
-    mature_by_coverage = sample_volume >= fallback_matches and eligible_count >= required_eligible
-    mature = mature_by_matches or mature_by_coverage
-    if mature_by_matches:
-        reason = f"match_count {sample_volume:g}/{min_matches}"
-    elif mature_by_coverage:
+    coverage_ready = eligible_count >= required_eligible
+    mature_by_matches_and_coverage = sample_volume >= min_matches and coverage_ready
+    mature_by_fallback_coverage = sample_volume >= fallback_matches and coverage_ready
+    mature = mature_by_matches_and_coverage or mature_by_fallback_coverage
+    if mature_by_matches_and_coverage:
+        reason = f"match_count {sample_volume:g}/{min_matches}, eligible {eligible_count}/{required_eligible}"
+    elif mature_by_fallback_coverage:
         reason = f"coverage {sample_volume:g}/{fallback_matches}, eligible {eligible_count}/{required_eligible}"
     else:
         reason = f"sample {sample_volume:g}/{min_matches}, eligible {eligible_count}/{required_eligible}"
@@ -1911,6 +1917,9 @@ def policy_gate_metrics(policy, settings=None):
         "minMatches": min_matches,
         "fallbackMatches": fallback_matches,
         "minEligibleRatio": round1(float(settings.get("minEligibleRatio") or 0) * 100),
+        "coverageReady": coverage_ready,
+        "matureByMatchesAndCoverage": mature_by_matches_and_coverage,
+        "matureByFallbackCoverage": mature_by_fallback_coverage,
         "mature": mature,
         "reason": reason,
     }
@@ -1960,6 +1969,13 @@ def write_json_atomic(path: Path, payload):
     tmp.replace(path)
 
 
+def policy_export_relative(path: Path):
+    try:
+        return path.relative_to(POLICY_EXPORT_DIR).as_posix()
+    except ValueError:
+        return str(path)
+
+
 def archive_stable_champion_tier_policy(policy):
     meta = policy.get("metadata") or {}
     patch = safe_file_part(meta.get("patch") or "all")
@@ -1977,8 +1993,8 @@ def archive_stable_champion_tier_policy(policy):
     index = load_policy_history_index()
     index.setdefault("version", 1)
     index.setdefault("championTier", {})[policy_history_key(policy)] = {
-        "json": str(json_path),
-        "tsv": str(tsv_path),
+        "json": policy_export_relative(json_path),
+        "tsv": policy_export_relative(tsv_path),
         "patch": meta.get("patch"),
         "source": meta.get("source"),
         "scope": meta.get("scope"),
@@ -2000,6 +2016,12 @@ def load_last_stable_champion_tier_policy(candidate_policy):
     if isinstance(policy, dict) and isinstance(policy.get("rows"), list):
         return policy
     return None
+
+
+def held_policy_is_usable(policy, settings):
+    if not isinstance(policy, dict) or not isinstance(policy.get("rows"), list):
+        return False
+    return bool(policy_gate_metrics(policy, settings).get("mature"))
 
 
 def load_existing_champion_tier_tsv(path: Path):
@@ -2136,7 +2158,7 @@ def apply_champion_tier_policy_gate(candidate_policy, fallback_builder=None):
 
     hold_reason = metrics.get("reason") or "latest policy sample gate not met"
     held = load_last_stable_champion_tier_policy(candidate_policy)
-    if held:
+    if held and held_policy_is_usable(held, settings):
         effective = reconcile_held_champion_tier_policy(candidate_policy, held, hold_reason, "history")
         decision = "hold_previous"
         return copy_policy_with_gate(

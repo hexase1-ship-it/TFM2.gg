@@ -35,6 +35,9 @@ STEAM_APP_ID = "3009300"
 PACKAGE_LAYOUT_VERSION = 4
 DASHBOARD_INSTALL_DIR_NAME = APP_NAME
 DASHBOARD_EXE_NAME = "TFM2MetaDashboard.exe"
+BACKUP_KEEP_COUNT = 5
+BACKUP_MIN_KEEP_COUNT = 2
+BACKUP_MAX_BYTES = 2 * 1024 * 1024 * 1024
 DASHBOARD_SHELL_DEFAULT_ITEMS = (
     DASHBOARD_EXE_NAME,
     "locales",
@@ -468,6 +471,15 @@ def dir_size(path: Path) -> int:
             except OSError:
                 pass
     return total
+
+
+def format_bytes(size: int) -> str:
+    value = float(size or 0)
+    for unit in ["B", "KB", "MB", "GB"]:
+        if value < 1024 or unit == "GB":
+            return f"{value:.1f}{unit}" if unit != "B" else f"{int(value)}B"
+        value /= 1024
+    return f"{value:.1f}GB"
 
 
 class RemoteUpdateError(RuntimeError):
@@ -1370,7 +1382,11 @@ class InstallerModel:
                 item for item in install_dir.iterdir()
                 if item.name.lower() not in DASHBOARD_SHELL_EXCLUDED_NAMES
             ]
-        self.backup_existing(game_dir, existing_shell_items)
+        unknown_shell_items = [
+            item for item in existing_shell_items
+            if item.name not in DASHBOARD_SHELL_DEFAULT_ITEMS
+        ]
+        self.backup_existing(game_dir, unknown_shell_items)
         for target in existing_shell_items:
             if target.exists():
                 remove_known_path(game_dir, target)
@@ -1485,6 +1501,66 @@ class InstallerModel:
         ]:
             remove_empty_known_dir(game_dir, target)
 
+    def backup_dir(self) -> Path:
+        return user_state_dir() / "backups"
+
+    def backup_status(self) -> dict:
+        root = self.backup_dir()
+        dirs = [path for path in root.iterdir() if path.is_dir()] if root.exists() else []
+        total = 0
+        for path in dirs:
+            total += dir_size(path)
+        return {
+            "path": str(root),
+            "count": len(dirs),
+            "size": total,
+            "limit": BACKUP_MAX_BYTES,
+            "keepCount": BACKUP_KEEP_COUNT,
+        }
+
+    def prune_backups(self) -> dict:
+        root = self.backup_dir()
+        if not root.exists():
+            return {"deletedDirs": 0, "deletedBytes": 0, **self.backup_status()}
+        entries = []
+        for path in root.iterdir():
+            if not path.is_dir():
+                continue
+            try:
+                stat = path.stat()
+            except OSError:
+                continue
+            entries.append({
+                "path": path,
+                "mtime": stat.st_mtime,
+                "size": dir_size(path),
+            })
+        entries.sort(key=lambda row: row["mtime"], reverse=True)
+        total = sum(row["size"] for row in entries)
+        remove_paths = []
+        for row in entries[BACKUP_KEEP_COUNT:]:
+            remove_paths.append(row)
+        kept = [row for row in entries if row not in remove_paths]
+        while total - sum(row["size"] for row in remove_paths) > BACKUP_MAX_BYTES and len(kept) > BACKUP_MIN_KEEP_COUNT:
+            oldest = kept.pop()
+            remove_paths.append(oldest)
+        deleted_dirs = 0
+        deleted_bytes = 0
+        for row in remove_paths:
+            path = row["path"]
+            try:
+                resolved = path.resolve()
+                root_resolved = root.resolve()
+                if root_resolved != resolved and root_resolved in resolved.parents:
+                    shutil.rmtree(path)
+                    deleted_dirs += 1
+                    deleted_bytes += int(row["size"] or 0)
+            except OSError:
+                continue
+        status = self.backup_status()
+        status.update({"deletedDirs": deleted_dirs, "deletedBytes": deleted_bytes})
+        return status
+
     def backup_existing(self, game_dir: Path, targets: list[Path]) -> None:
         existing = [target for target in targets if target.exists()]
         if not existing:
@@ -1500,6 +1576,7 @@ class InstallerModel:
             else:
                 dst.parent.mkdir(parents=True, exist_ok=True)
                 shutil.copy2(target, dst)
+        self.prune_backups()
 
     def installed_status(self, game_dir: Path) -> dict:
         addon_status = {}
@@ -1583,6 +1660,7 @@ class InstallerModel:
             "dashboardSize": dir_size(dashboard),
             "dashboardShellSize": dashboard_shell.stat().st_size if dashboard_shell.exists() else 0,
             "addonSize": addon_status[MOD_ID]["size"],
+            "backup": self.backup_status(),
         }
 
     def package_version(self, manifest: dict | None) -> str:
@@ -2177,7 +2255,8 @@ class Tfm2InstallerApp(tk.Tk):
         footer.grid(row=5, column=0, sticky="ew", pady=(12, 0))
         footer.columnconfigure(0, weight=1)
         ttk.Label(footer, textvariable=self.status_var, style="Subtle.TLabel").grid(row=0, column=0, sticky="w")
-        ttk.Button(footer, text="상태 새로고침", style="Refresh.TButton", command=self.refresh_status).grid(row=0, column=1, sticky="e")
+        ttk.Button(footer, text="백업 정리", command=lambda: self.run_task("clean_backups")).grid(row=0, column=1, sticky="e", padx=(0, 8))
+        ttk.Button(footer, text="상태 새로고침", style="Refresh.TButton", command=self.refresh_status).grid(row=0, column=2, sticky="e")
 
     def make_info_card(self, parent, column: int, title: str, var: tk.StringVar):
         card = ttk.Frame(parent, style="Card.TFrame", padding=14)
@@ -2228,6 +2307,7 @@ class Tfm2InstallerApp(tk.Tk):
         )
         meta_logs = installed["addonLogs"]["metaTier"]
         ai_logs = installed["addonLogs"]["aiBanpick"]
+        backup = installed.get("backup") or {}
         shell_state = "설치됨" if installed["dashboardShellInstalled"] else "없음"
         dashboard_state = "설치됨" if installed["dashboardInstalled"] else "없음"
         install_lines = [
@@ -2240,6 +2320,7 @@ class Tfm2InstallerApp(tk.Tk):
             installed["policyDetails"]["aiCandidateMap"],
             f"정책 TSV: {'있음' if policy_ok else '없음'}",
             f"모드 로그: 티어 {'있음' if meta_logs['latest'] or meta_logs['debug'] else '대기'} / AI {'있음' if ai_logs['debug'] else '대기'}",
+            f"백업: {backup.get('count', 0)}개 / {format_bytes(int(backup.get('size') or 0))}",
             f"메타 생성: {installed['coreGeneratedAt']}",
         ]
         self.install_card_var.set("\n".join(install_lines))
@@ -2287,6 +2368,20 @@ class Tfm2InstallerApp(tk.Tk):
                 self.model.remove_all(game_dir)
                 self.work_queue.put(("log", "제거 완료: TFM2.gg 설치 항목을 제거했습니다."))
                 self.work_queue.put(("success", ("제거 완료", "TFM2.gg 설치 항목을 제거했습니다.\n기존 파일은 백업 후 처리되었습니다.")))
+            elif kind == "clean_backups":
+                status = self.model.prune_backups()
+                deleted_dirs = int(status.get("deletedDirs") or 0)
+                deleted_bytes = int(status.get("deletedBytes") or 0)
+                kept_count = int(status.get("count") or 0)
+                kept_size = int(status.get("size") or 0)
+                self.work_queue.put(("log", f"백업 정리 완료: {deleted_dirs}개 삭제, {format_bytes(deleted_bytes)} 확보"))
+                self.work_queue.put((
+                    "info",
+                    (
+                        "백업 정리 완료",
+                        f"남은 백업: {kept_count}개\n사용량: {format_bytes(kept_size)}\n보존 기준: 최근 {BACKUP_KEEP_COUNT}개 / 최대 {format_bytes(BACKUP_MAX_BYTES)}",
+                    ),
+                ))
             elif kind == "update":
                 package, release = self.model.download_latest_distribution()
                 remote_manifest = self.model.remote_manifest(package)

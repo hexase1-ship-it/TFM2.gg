@@ -1,24 +1,24 @@
 # AUTO_GENERATED_BY_TFM2_META_DASHBOARD
 # Do not hand-edit unless you intentionally want to override dashboard meta scoring.
-# Generated: 2026-06-06T23:39:18
+# Generated: 2026-06-07T12:44:02
 # Save: C:\Users\hexas\AppData\Roaming\TeamSamoyed\TeamfightManager2\data\save_20260606_171107.data
-# Source: tournament patch 2026.0.0
-# Patch: 2026.0.0
+# Source: tournament patch 2026.1.0
+# Patch: 2026.1.0
 # Scope: tournament
 # Region: all
 # Role: all
 # Model: tfm2gg-meta-v1
 # Preset: fearless weights={"draftPressure": 0.22, "lowerPressure": 0.18, "lowerStrength": 0.82, "strength": 0.78}
 # PolicyPresetSource: policy setting
-# Sample: early min=5 reason=4 matches
-# SampleVolume: 4.0
-# PatchGate: mode=sampleGate decision=hold_previous source=history mature=False
-# RequestedPatch: 2026.0.1
-# EffectivePatch: 2026.0.0
-# HoldReason: sample 4/100, eligible 0/29
-# GateMetrics: matches=4.0 min=100 fallback=50 eligible=0/64 required=29
-# WinPrior: mean=50.0 kappa=50.0
-# BaselinePresence: 49.5
+# Sample: normal min=10 reason=336 matches
+# SampleVolume: 336.0
+# PatchGate: mode=sampleGate decision=apply_latest source=candidate mature=True
+# RequestedPatch: 2026.1.0
+# EffectivePatch: 2026.1.0
+# HoldReason: match_count 336/100, eligible 43/29
+# GateMetrics: matches=336.0 min=100 fallback=50 eligible=43/64 required=29
+# WinPrior: mean=50.0 kappa=31.5
+# BaselinePresence: 27.1
 # PolicyKind: championTier
 # OverallSemantic: dashboard_meta_tier_for_in_game_sabcd_no
 # OverallNote: overall is an S/A/B/C/D anchor for the native tier addon; No leaves overall blank and is applied as explicit NoTier for active champions.
@@ -28,67 +28,67 @@
 # For No tier, overall is omitted and the native addon writes an explicit NoTier entry.
 # Non-eligible or low-sample champions are emitted as No with blank overall.
 # champion_id	tier	overall
-hitman	D	35.0
-vampire	B	62.0
-dark_mage	D	35.0
-illusionist	C	50.0
-pyromancer	C	50.0
-bomber	A	75.0
-gunner	A	75.0
-executioner	D	35.0
-whip_master	A	75.0
-lancer	A	75.0
-hammerer	D	35.0
-prisoner	D	35.0
-spirit_caller	No
-enchanter	No
-inquisitor	D	35.0
-bard	D	35.0
-ghost	D	35.0
-chef	No
-ogre	D	35.0
-oni	No
-plague_doctor	No
-exorcist	D	35.0
-ice_mage	C	50.0
-android	S	90.0
-demon	No
-guardian_spirit	D	35.0
-soldier	A	75.0
-priest	D	35.0
-hunter	A	75.0
-boomerang_hunter	D	35.0
-voodoo_shaman	No
-pole_warrior	D	35.0
-lightning_mage	D	35.0
-white_mage	D	35.0
-shield_bearer	C	50.0
-beast_valtan	No
-wind_mage	A	75.0
-dancer	D	35.0
-pythoness	C	50.0
-monk	A	75.0
-malphite	No
-magic_knight	D	35.0
-druid	D	35.0
-dual_blader	S	90.0
-poison_dart_hunter	C	50.0
-taoist	No
-gambler	B	62.0
-dokkaebi	D	35.0
-squirrel	No
-ninja	D	35.0
-werewolf	D	35.0
-necromancer	No
-knight	C	50.0
-cavalry_knight	S	90.0
+malphite	S	90.0
+beast_valtan	S	90.0
+soldier	S	90.0
+dual_blader	A	75.0
+gambler	A	75.0
+android	A	75.0
+ninja	A	75.0
+shield_bearer	B	62.0
+hunter	B	62.0
+circus_blade	B	62.0
+spirit_caller	B	62.0
+guardian_spirit	B	62.0
+bard	B	62.0
+poison_dart_hunter	B	62.0
+barrier_magician	B	62.0
+fighter	B	62.0
+demon	B	62.0
+archer	C	50.0
+swordman	C	50.0
+monk	C	50.0
 shadowmancer	C	50.0
-archer	B	62.0
-berserker	D	35.0
-clown	D	35.0
-siege_breaker	C	50.0
-circus_blade	C	50.0
-barrier_magician	D	35.0
-fighter	C	50.0
-swordman	B	62.0
-jiangshi	D	35.0
+wind_mage	C	50.0
+white_mage	C	50.0
+illusionist	C	50.0
+bomber	C	50.0
+gunner	C	50.0
+pyromancer	C	50.0
+lancer	C	50.0
+berserker	C	50.0
+ghost	C	50.0
+whip_master	D	35.0
+siege_breaker	D	35.0
+pythoness	D	35.0
+dancer	D	35.0
+ice_mage	D	35.0
+executioner	D	35.0
+cavalry_knight	D	35.0
+taoist	D	35.0
+werewolf	D	35.0
+plague_doctor	D	35.0
+squirrel	D	35.0
+oni	D	35.0
+vampire	D	35.0
+hitman	No
+dark_mage	No
+hammerer	No
+prisoner	No
+enchanter	No
+inquisitor	No
+chef	No
+ogre	No
+exorcist	No
+priest	No
+boomerang_hunter	No
+voodoo_shaman	No
+pole_warrior	No
+lightning_mage	No
+magic_knight	No
+druid	No
+dokkaebi	No
+necromancer	No
+knight	No
+clown	No
+jiangshi	No
