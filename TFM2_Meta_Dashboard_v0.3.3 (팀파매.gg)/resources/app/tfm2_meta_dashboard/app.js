@@ -47,13 +47,13 @@ const addonPolicyPresetModes = [
 const tierPolicyGateModes = [
   ["sampleGate", "표본 확보 후 최신 패치 적용"],
   ["immediate", "표본 부족해도 즉시 적용"],
-  ["locked", "현재 인게임 티어 유지"],
+  ["locked", "자동 갱신 중지 · 수동 변경 허용"],
 ];
 
 const tierPolicyGateDescriptions = {
   sampleGate: "권장: 패치 직후 표본이 적으면 이전 안정 티어를 유지하고, 대회 데이터가 충분히 쌓이면 최신 패치 티어로 전환합니다.",
   immediate: "테스트용: 최신 패치 표본이 부족해도 바로 인게임 티어표를 덮어씁니다. 패치 직후에는 No 티어가 많아질 수 있습니다.",
-  locked: "고정: 새 데이터가 쌓여도 현재 적용된 인게임 티어표를 유지합니다. 직접 바꾸기 전까지 보수적으로 묶어둡니다.",
+  locked: "고정: 새 데이터가 쌓여도 TSV를 최신 메타로 바꾸지 않습니다. 정책 파일이 갱신될 때만 1회 반영하고, 이후 인게임에서 직접 바꾼 티어는 다시 덮지 않습니다.",
 };
 
 const sampleModes = [

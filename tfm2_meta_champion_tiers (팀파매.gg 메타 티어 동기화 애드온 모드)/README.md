@@ -23,6 +23,7 @@ OP -> S
 - 모든 팀의 챔피언 티어 맵에 정책을 적용합니다.
 - `No` 행은 게임 내부의 `ChampionTier::NoTier`로 적용합니다.
 - 정책 파일이 바뀌면 다음 적용 주기에서 다시 읽습니다.
+- 같은 정책 파일 revision은 서버/클라이언트 각각 한 번만 반영합니다. 이후 인게임에서 수동으로 바꾼 티어는 대시보드에서 정책을 다시 생성하기 전까지 덮어쓰지 않습니다.
 - 적용 결과는 `debug.log`와 `tier-policy-latest.txt`에 남깁니다.
 
 ## 정책 파일 형식
@@ -59,6 +60,6 @@ policy_file=champion_tier_policy.tsv
 
 ## 버전
 
-- 애드온 버전: 0.2.3
+- 애드온 버전: 0.2.5
 - 대상 게임/SDK: Teamfight Manager 2 0.4.10
 - 구현 방식: 팀파매.gg 소스 기반 Rust 재구현
