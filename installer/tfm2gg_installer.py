@@ -332,6 +332,12 @@ def summarize_policy_gate(path: Path) -> str:
         return f" / gate immediate {effective}"
     if "decision=fallback_all_patches" in gate:
         return f" / gate fallback {effective} ({metrics})"
+    if "decision=awaiting_sample" in gate:
+        return f" / gate sample-wait ({metrics})"
+    if "decision=locked_existing_tsv" in gate:
+        return f" / gate locked {effective}"
+    if "decision=locked_no_existing_policy" in gate:
+        return " / gate locked no-policy"
     if "decision=hold" in gate:
         return f" / gate hold {requested}->{effective} ({metrics})"
     return f" / gate {gate}"

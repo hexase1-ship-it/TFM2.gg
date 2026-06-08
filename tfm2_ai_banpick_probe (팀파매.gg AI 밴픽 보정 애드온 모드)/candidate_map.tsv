@@ -1,15 +1,15 @@
 # AUTO_GENERATED_BY_TFM2_META_DASHBOARD
 # Do not hand-edit unless you intentionally want to override dashboard AI draft mapping.
-# Generated: 2026-06-07T12:44:02
-# Source: overall patch 2026.1.0
-# Patch: 2026.1.0
+# Generated: 2026-06-08T21:16:07
+# Source: overall all patches
+# Patch: all
 # Scope: overall
-# Preset: fearless
+# Preset: classic
 # MapKind: aiCandidateMap
-# CustomCandidateMode: conditional_custom
+# CustomCandidateMode: base_only
 # BaseCandidateCount: 60
-# ActiveExternalChampionCount: 4
-# ExpectedRuntimeChampionCount: 64
+# ActiveExternalChampionCount: 0
+# ExpectedRuntimeChampionCount: 60
 # Verification: custom rows are applied only when runtime available_champions count matches ExpectedRuntimeChampionCount.
 # Verification: base rows must match the built-in 0..59 candidate order.
 # Format: candidate_index<TAB>champion_id<TAB>source<TAB>status
@@ -74,7 +74,3 @@
 57	guardian_spirit	base	verified_base
 58	hunter	base	verified_base
 59	circus_blade	base	verified_base
-60	malphite	active_external	conditional_external
-61	beast_valtan	active_external	conditional_external
-62	oni	active_external	conditional_external
-63	squirrel	active_external	conditional_external

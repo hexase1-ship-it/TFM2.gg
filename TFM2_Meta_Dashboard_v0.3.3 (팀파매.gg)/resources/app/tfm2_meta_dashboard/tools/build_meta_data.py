@@ -1653,14 +1653,17 @@ def ai_policy_overall(entry):
 
 def select_policy_stats(default_stats, stats_by_patch, patch_versions, scope="overall"):
     requested = os.environ.get("TFM2_POLICY_PATCH", "latest").strip()
-    if requested in {"", "latest"}:
+    requested_latest = requested in {"", "latest"}
+    if requested_latest:
         patch = patch_versions[-1] if patch_versions else "all"
     else:
         patch = requested
     if patch != "all":
-        rows = (stats_by_patch.get(patch, {}) or {}).get(scope)
-        if rows:
-            return rows, patch, f"{scope} patch {patch}"
+        patch_payload = stats_by_patch.get(patch)
+        if isinstance(patch_payload, dict) and scope in patch_payload:
+            return patch_payload.get(scope) or {}, patch, f"{scope} patch {patch}"
+        if requested_latest and patch_versions:
+            return {}, patch, f"{scope} patch {patch}"
     return default_stats, "all", f"{scope} all patches"
 
 
@@ -1842,7 +1845,7 @@ def render_policy_tsv(policy, profile_key):
         "# AUTO_GENERATED_BY_TFM2_META_DASHBOARD",
         "# Do not hand-edit unless you intentionally want to override dashboard meta scoring.",
         f"# Generated: {meta['generatedAt']}",
-        f"# Save: {meta.get('save') or ''}",
+        f"# Save: {meta.get('save') or '-'}",
         f"# Source: {meta.get('source')}",
         f"# Patch: {meta.get('patch')}",
         f"# Scope: {meta.get('scope')}",
@@ -2152,11 +2155,32 @@ def reconcile_held_champion_tier_policy(current_policy, held_policy, reason, sou
     return current
 
 
+def no_tier_wait_policy(policy, reason):
+    current = json.loads(json.dumps(policy, ensure_ascii=False))
+    rows = []
+    for row in current.get("rows") or []:
+        next_row = dict(row)
+        if next_row.get("reason") == "inactive_external_champion_mod_cleanup":
+            next_row["reason"] = "inactive_external_champion_mod_cleanup"
+        else:
+            next_row["reason"] = "sample_gate_waiting_for_tournament_data"
+        next_row["tier"] = "No"
+        next_row["tierOverall"] = None
+        next_row["eligible"] = False
+        rows.append(next_row)
+    current["rows"] = rows
+    current.setdefault("metadata", {})["eligibleCount"] = 0
+    current["metadata"]["heldPolicyReason"] = reason
+    current["metadata"]["heldPolicySourceKind"] = "candidate_no_sample"
+    return current
+
+
 def apply_champion_tier_policy_gate(candidate_policy, fallback_builder=None):
     settings = tier_policy_gate_settings()
     metrics = policy_gate_metrics(candidate_policy, settings)
-    candidate_meta = candidate_policy.get("metadata") or {}
     mode = settings.get("mode")
+    fallback = fallback_builder() if fallback_builder else None
+    fallback_metrics = policy_gate_metrics(fallback, settings) if fallback else None
 
     if mode == "immediate":
         decision = "apply_immediate"
@@ -2180,51 +2204,39 @@ def apply_champion_tier_policy_gate(candidate_policy, fallback_builder=None):
         return gated
 
     hold_reason = metrics.get("reason") or "latest policy sample gate not met"
-    held = load_last_stable_champion_tier_policy(candidate_policy)
-    if held and held_policy_is_usable(held, settings):
-        effective = reconcile_held_champion_tier_policy(candidate_policy, held, hold_reason, "history")
-        decision = "hold_previous"
+
+    if mode == "locked":
+        existing = load_existing_champion_tier_tsv(CHAMPION_TIER_POLICY_OUT)
+        if existing:
+            effective = reconcile_held_champion_tier_policy(candidate_policy, existing, hold_reason, "locked_existing_tsv")
+            decision = "locked_existing_tsv"
+            return copy_policy_with_gate(
+                effective,
+                gate_metadata(settings, decision, hold_reason, candidate_policy, effective, "locked_existing_tsv", metrics),
+            )
+        decision = "locked_no_existing_policy"
+        reason = f"{hold_reason}; no existing policy to keep"
         return copy_policy_with_gate(
-            effective,
-            gate_metadata(settings, decision, hold_reason, candidate_policy, effective, "history", metrics),
+            candidate_policy,
+            gate_metadata(settings, decision, reason, candidate_policy, candidate_policy, "candidate_no_history", metrics),
         )
 
-    existing = load_existing_champion_tier_tsv(CHAMPION_TIER_POLICY_OUT)
-    existing_patch = (existing.get("metadata") or {}).get("patch") if existing else None
-    if existing and existing_patch and existing_patch != candidate_meta.get("patch"):
-        effective = reconcile_held_champion_tier_policy(candidate_policy, existing, hold_reason, "existing_tsv")
-        decision = "hold_existing_tsv"
-        return copy_policy_with_gate(
-            effective,
-            gate_metadata(settings, decision, hold_reason, candidate_policy, effective, "existing_tsv", metrics),
-        )
-
-    fallback = fallback_builder() if fallback_builder else None
-    if fallback:
-        fallback_metrics = policy_gate_metrics(fallback, settings)
+    if fallback and fallback_metrics and fallback_metrics.get("mature"):
         decision = "fallback_all_patches"
         reason = f"{hold_reason}; no previous stable patch policy"
         effective = copy_policy_with_gate(
             fallback,
             gate_metadata(settings, decision, reason, candidate_policy, fallback, "fallback_all_patches", metrics),
         )
-        if fallback_metrics.get("mature"):
-            archive_stable_champion_tier_policy(effective)
+        archive_stable_champion_tier_policy(effective)
         return effective
 
-    if existing:
-        effective = reconcile_held_champion_tier_policy(candidate_policy, existing, hold_reason, "existing_tsv_last_resort")
-        decision = "hold_existing_tsv_last_resort"
-        return copy_policy_with_gate(
-            effective,
-            gate_metadata(settings, decision, hold_reason, candidate_policy, effective, "existing_tsv_last_resort", metrics),
-        )
-
-    decision = "apply_without_history"
-    reason = f"{hold_reason}; no previous policy source exists"
+    decision = "awaiting_sample"
+    reason = f"{hold_reason}; no mature tournament policy source exists"
+    effective = no_tier_wait_policy(candidate_policy, reason)
     return copy_policy_with_gate(
-        candidate_policy,
-        gate_metadata(settings, decision, reason, candidate_policy, candidate_policy, "candidate_no_history", metrics),
+        effective,
+        gate_metadata(settings, decision, reason, candidate_policy, effective, "candidate_no_sample", metrics),
     )
 
 
@@ -2318,20 +2330,24 @@ def write_policy_exports(champion_tier_policy, ai_champion_policy=None):
     tier_text = render_policy_tsv(champion_tier_policy, "championTier")
     ai_text = render_policy_tsv(ai_champion_policy, "aiChampion")
     ai_candidate_map_text = render_ai_candidate_map_tsv(ai_champion_policy)
+    game_root = detect_game_root_for_mods(ROOT)
+    live_tier_policy_out = game_root / "mods" / "tfm2_meta_champion_tiers" / "champion_tier_policy.tsv"
+    live_ai_policy_out = game_root / "mods" / "tfm2_ai_banpick_probe" / "ai_champion_policy.tsv"
+    live_ai_candidate_map_out = game_root / "mods" / "tfm2_ai_banpick_probe" / "candidate_map.tsv"
     tier_written, tier_skipped = write_policy_file(
         tier_text,
         [CHAMPION_TIER_POLICY_OUT],
-        [CHAMPION_TIER_POLICY_MOD_OUT, CHAMPION_TIER_POLICY_SOURCE_MOD_OUT],
+        [CHAMPION_TIER_POLICY_MOD_OUT, CHAMPION_TIER_POLICY_SOURCE_MOD_OUT, live_tier_policy_out],
     )
     ai_written, ai_skipped = write_policy_file(
         ai_text,
         [AI_CHAMPION_POLICY_OUT],
-        [AI_CHAMPION_POLICY_MOD_OUT, AI_CHAMPION_POLICY_SOURCE_MOD_OUT],
+        [AI_CHAMPION_POLICY_MOD_OUT, AI_CHAMPION_POLICY_SOURCE_MOD_OUT, live_ai_policy_out],
     )
     candidate_map_written, candidate_map_skipped = write_policy_file(
         ai_candidate_map_text,
         [AI_CANDIDATE_MAP_OUT],
-        [AI_CANDIDATE_MAP_MOD_OUT, AI_CANDIDATE_MAP_SOURCE_MOD_OUT],
+        [AI_CANDIDATE_MAP_MOD_OUT, AI_CANDIDATE_MAP_SOURCE_MOD_OUT, live_ai_candidate_map_out],
     )
     return {
         "championTierPolicy": {

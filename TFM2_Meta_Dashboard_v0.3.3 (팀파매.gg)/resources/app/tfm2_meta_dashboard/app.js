@@ -51,7 +51,7 @@ const tierPolicyGateModes = [
 ];
 
 const tierPolicyGateDescriptions = {
-  sampleGate: "권장: 패치 직후 표본이 적으면 이전 안정 티어를 유지하고, 대회 데이터가 충분히 쌓이면 최신 패치 티어로 전환합니다.",
+  sampleGate: "권장: 최신 패치 표본이 적으면 현재 세이브의 전체 대회 데이터가 충분할 때만 보수적으로 적용하고, 데이터가 없으면 낡은 티어표를 재사용하지 않습니다.",
   immediate: "테스트용: 최신 패치 표본이 부족해도 바로 인게임 티어표를 덮어씁니다. 패치 직후에는 No 티어가 많아질 수 있습니다.",
   locked: "고정: 새 데이터가 쌓여도 TSV를 최신 메타로 바꾸지 않습니다. 정책 파일이 갱신될 때만 1회 반영하고, 이후 인게임에서 직접 바꾼 티어는 다시 덮지 않습니다.",
 };
@@ -1732,11 +1732,46 @@ function addonTierPolicyGateSummary() {
       title: baseTitle,
     };
   }
-  if (decision.startsWith("hold") || decision === "fallback_all_patches") {
+  if (decision === "fallback_all_patches") {
     return {
       label: "인게임 티어 기준",
-      value: `이전 유지: ${effectiveLabel}`,
-      title: `최신 ${requestedLabel} 표본 부족으로 ${effectiveLabel} 기준을 유지합니다. 표본 ${sample}/${minMatches}, 산출 ${eligible}/${active}`,
+      value: "전체 패치 기준",
+      title: `최신 ${requestedLabel} 표본이 부족해 전체 패치 기준으로 인게임 티어표를 적용합니다. 표본 ${sample}/${minMatches}, 산출 ${eligible}/${active}`,
+    };
+  }
+  if (decision === "hold_previous") {
+    return {
+      label: "인게임 티어 기준",
+      value: "표본 대기: 안정 티어",
+      title: `최신 ${requestedLabel} 표본이 부족해 이전 안정 티어 정책(${effectiveLabel})을 유지합니다. 표본 ${sample}/${minMatches}, 산출 ${eligible}/${active}`,
+    };
+  }
+  if (decision === "awaiting_sample") {
+    return {
+      label: "인게임 티어 기준",
+      value: "표본 대기: 티어 없음",
+      title: `현재 세이브의 대회 표본이 아직 없어 낡은 티어표를 재사용하지 않습니다. 표본 ${sample}/${minMatches}, 산출 ${eligible}/${active}`,
+    };
+  }
+  if (decision === "locked_existing_tsv") {
+    return {
+      label: "인게임 티어 기준",
+      value: "현재 티어 고정",
+      title: `자동 갱신을 멈추고 현재 인게임 티어 정책(${effectiveLabel})을 유지합니다.`,
+    };
+  }
+  if (decision === "locked_no_existing_policy") {
+    return {
+      label: "인게임 티어 기준",
+      value: "고정 대기: 정책 없음",
+      title: "고정할 기존 인게임 티어 정책이 아직 없습니다. 정책을 한 번 생성한 뒤 고정할 수 있습니다.",
+    };
+  }
+  if (decision.startsWith("hold")) {
+    return {
+      label: "인게임 티어 기준",
+      value: "표본 대기: 기존 티어",
+      title: `최신 ${requestedLabel} 표본이 부족해 현재 인게임 티어 정책(${effectiveLabel})을 유지합니다. 표본 ${sample}/${minMatches}, 산출 ${eligible}/${active}`,
     };
   }
   if (decision === "apply_immediate") {
@@ -1751,6 +1786,19 @@ function addonTierPolicyGateSummary() {
     value: `최신 적용: ${effectiveLabel}`,
     title: `최신 패치 기준으로 인게임 티어표를 적용 중입니다. 표본 ${sample}/${minMatches}, 산출 ${eligible}/${active}`,
   };
+}
+
+function metaExportReason() {
+  return String(DATA.sources?.metaExportReason || "");
+}
+
+function metaExportIsWaiting(reason = metaExportReason()) {
+  return ["no_export_data", "export_dir_missing"].includes(reason);
+}
+
+function metaExportHasHardError() {
+  const reason = metaExportReason();
+  return DATA.sources.metaExportUsable === false && Boolean(reason) && !metaExportIsWaiting(reason);
 }
 
 function renderSummary(champs) {
@@ -1777,13 +1825,16 @@ function renderSummary(champs) {
     <div class="summary-card" title="${replayDateQualityTitle(replayInfo)}"><span>날짜 추정</span><strong>${fmt(replayInfo.assigned || 0)} / ${fmt(replayInfo.sets || 0)}</strong></div>
   `;
   const exportMismatched = Boolean(DATA.sources.metaExportMismatched);
-  const exportIncompatible = DATA.sources.metaExportUsable === false && DATA.sources.metaExportReason;
+  const exportWaiting = DATA.sources.metaExportUsable === false && metaExportIsWaiting();
+  const exportIncompatible = metaExportHasHardError();
   const saveProbeActive = Boolean(DATA.sources.saveProbe);
   const replayLookupMissing = Boolean(DATA.sources.metaExporter && !DATA.sources.exactReplayAthleteNames);
   const snapshotActive = DATA.sources.metaExporter || saveProbeActive;
   document.getElementById("exportStatus").className = `pill ${snapshotActive && !exportMismatched && !exportIncompatible && !replayLookupMissing ? "ok" : "warn"}`;
   document.getElementById("exportStatus").textContent = exportIncompatible
     ? "Meta Exporter 호환 오류"
+    : exportWaiting
+    ? "Meta Exporter 대기 중"
     : exportMismatched
     ? "세이브/Exporter 불일치"
     : replayLookupMissing
@@ -3043,8 +3094,12 @@ function renderMatchView() {
   const container = document.getElementById("matchView");
   const allRows = DATA.matchAnalysis || [];
   if (!allRows.length) {
-    if (DATA.sources.metaExportUsable === false) {
-      container.innerHTML = `<p class="notice warning-notice">Meta Exporter 또는 Save Probe가 현재 게임 0.4.10 DB 구조 일부와 맞지 않아 예전 리플레이 export 파일을 무시했어. 0.4.10용 진단 도구가 정상 추출될 때까지 신규 경기 분석은 제한될 수 있어.</p>`;
+    if (metaExportHasHardError()) {
+      container.innerHTML = `<p class="notice warning-notice">Meta Exporter 또는 Save Probe가 현재 게임 DB 구조 일부와 맞지 않아 예전 리플레이 export 파일을 무시했어. 최신 진단 도구가 정상 추출될 때까지 신규 경기 분석은 제한될 수 있어.</p>`;
+      return;
+    }
+    if (DATA.sources.metaExportUsable === false && metaExportIsWaiting()) {
+      container.innerHTML = `<p class="notice">Meta Exporter 통계가 아직 수집되지 않았어. 새 게임이거나 경기를 아직 진행하지 않은 상태라면 정상이고, 게임에서 경기를 진행한 뒤 대시보드를 새로고침하면 리플레이 분석이 채워져.</p>`;
       return;
     }
     if (DATA.sources.saveProbe) {
