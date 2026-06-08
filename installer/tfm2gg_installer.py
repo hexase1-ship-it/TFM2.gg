@@ -99,6 +99,8 @@ class AddonPackage:
 @dataclass(frozen=True)
 class WorkshopChampionMod:
     workshop_id: str
+    source_type: str
+    source_id: str
     mod_id: str
     name: str
     version: str
@@ -109,6 +111,12 @@ class WorkshopChampionMod:
     known: bool
     has_style_override: bool
     has_code: bool
+
+    @property
+    def source_label(self) -> str:
+        if self.source_type == "local":
+            return f"Local:{self.source_id}"
+        return f"Workshop:{self.workshop_id}"
 
 
 ADDON_PACKAGES = (
@@ -751,6 +759,15 @@ class InstallerModel:
                 return child, info
         return None
 
+    def local_mod_dirs(self, game_dir: Path) -> list[Path]:
+        mods_dir = game_dir / "mods"
+        if not mods_dir.exists():
+            return []
+        try:
+            return sorted(path for path in mods_dir.iterdir() if path.is_dir())
+        except OSError:
+            return []
+
     def load_champion_ids_from_mod(self, mod_root: Path) -> tuple[str, ...]:
         champion_dir = mod_root / "champion"
         if not champion_dir.exists():
@@ -841,13 +858,23 @@ class InstallerModel:
         return game_dir / "mods" / CHAMPION_VIEW_COMPAT_MOD_ID
 
     def workshop_override_backup_dir(self, row: WorkshopChampionMod, create: bool = False) -> Path:
-        path = (
-            user_state_dir()
-            / "workshop_override_backups"
-            / STEAM_APP_ID
-            / safe_file_component(row.workshop_id)
-            / safe_file_component(row.mod_id)
-        )
+        if row.source_type == "local":
+            path = (
+                user_state_dir()
+                / "workshop_override_backups"
+                / STEAM_APP_ID
+                / "local"
+                / safe_file_component(row.source_id)
+                / safe_file_component(row.mod_id)
+            )
+        else:
+            path = (
+                user_state_dir()
+                / "workshop_override_backups"
+                / STEAM_APP_ID
+                / safe_file_component(row.workshop_id)
+                / safe_file_component(row.mod_id)
+            )
         if create:
             path.mkdir(parents=True, exist_ok=True)
         return path
@@ -1070,6 +1097,8 @@ class InstallerModel:
             records.append({
                 "modId": row.mod_id,
                 "workshopId": row.workshop_id,
+                "sourceType": row.source_type,
+                "sourceId": row.source_id,
                 "path": str(override_path),
                 "backupPath": str(backup_path),
             })
@@ -1102,6 +1131,8 @@ class InstallerModel:
             records.append({
                 "modId": row.mod_id,
                 "workshopId": row.workshop_id,
+                "sourceType": row.source_type,
+                "sourceId": row.source_id,
                 "path": str(override_path),
                 "backupPath": str(backup_path),
             })
@@ -1213,41 +1244,50 @@ class InstallerModel:
         known = set(map(str, config.get("known_workshop_mods", [])))
         mods = []
         seen = set()
+
+        def append_mod(item_dir: Path, source_type: str, source_id: str) -> None:
+            located = self.find_workshop_mod_info(item_dir)
+            if not located:
+                return
+            mod_root, info_path = located
+            info = read_json(info_path, {})
+            if not isinstance(info, dict):
+                return
+            mod_id = str(info.get("mod_id") or info.get("id") or "").strip()
+            if not mod_id or mod_id in seen:
+                return
+            champion_ids = self.load_champion_ids_from_mod(mod_root)
+            if not champion_ids:
+                return
+            seen.add(mod_id)
+            mods.append(
+                WorkshopChampionMod(
+                    workshop_id=source_id if source_type == "workshop" else "local",
+                    source_type=source_type,
+                    source_id=source_id,
+                    mod_id=mod_id,
+                    name=str(info.get("name") or mod_id),
+                    version=str(info.get("version") or "-"),
+                    author=str(info.get("author") or "-"),
+                    path=mod_root,
+                    champion_ids=champion_ids,
+                    enabled=mod_id in enabled,
+                    known=mod_id in known or mod_id in enabled,
+                    has_style_override=self.mod_has_style_override(mod_root),
+                    has_code=bool(list(mod_root.rglob("*.dll"))),
+                )
+            )
+
+        for item_dir in self.local_mod_dirs(game_dir):
+            append_mod(item_dir, "local", item_dir.name)
+
         for content_dir in self.workshop_content_dirs(game_dir):
             try:
                 item_dirs = sorted(path for path in content_dir.iterdir() if path.is_dir())
             except OSError:
                 continue
             for item_dir in item_dirs:
-                located = self.find_workshop_mod_info(item_dir)
-                if not located:
-                    continue
-                mod_root, info_path = located
-                info = read_json(info_path, {})
-                if not isinstance(info, dict):
-                    continue
-                mod_id = str(info.get("mod_id") or info.get("id") or "").strip()
-                if not mod_id or mod_id in seen:
-                    continue
-                champion_ids = self.load_champion_ids_from_mod(mod_root)
-                if not champion_ids:
-                    continue
-                seen.add(mod_id)
-                mods.append(
-                    WorkshopChampionMod(
-                        workshop_id=item_dir.name,
-                        mod_id=mod_id,
-                        name=str(info.get("name") or mod_id),
-                        version=str(info.get("version") or "-"),
-                        author=str(info.get("author") or "-"),
-                        path=mod_root,
-                        champion_ids=champion_ids,
-                        enabled=mod_id in enabled,
-                        known=mod_id in known,
-                        has_style_override=self.mod_has_style_override(mod_root),
-                        has_code=bool(list(mod_root.rglob("*.dll"))),
-                    )
-                )
+                append_mod(item_dir, "workshop", item_dir.name)
         return mods
 
     def set_workshop_champion_mod_enabled(self, game_dir: Path, mod_id: str, enabled: bool) -> None:
@@ -2480,14 +2520,14 @@ class Tfm2InstallerApp(tk.Tk):
         ttk.Label(title, text="챔피언 추가 모드", style="Title.TLabel").grid(row=0, column=0, sticky="w")
         ttk.Label(
             title,
-            text="Steam 창작마당에서 감지된 챔피언 추가 모드를 게임 활성 목록에 켜고 끕니다. 적용 후 게임 재시작이 필요합니다.",
+            text="Steam 창작마당과 게임 mods 폴더에서 감지된 챔피언 추가 모드를 게임 활성 목록에 켜고 끕니다. 적용 후 게임 재시작이 필요합니다.",
             style="Subtle.TLabel",
         ).grid(row=1, column=0, sticky="w", pady=(3, 0))
 
         info_var = tk.StringVar(value="")
         ttk.Label(frame, textvariable=info_var, style="Subtle.TLabel").grid(row=1, column=0, sticky="w", pady=(0, 8))
 
-        columns = ("state", "name", "mod_id", "version", "champions", "workshop", "warnings")
+        columns = ("state", "name", "mod_id", "version", "champions", "source", "warnings")
         tree = ttk.Treeview(frame, columns=columns, show="headings", selectmode="browse")
         headers = {
             "state": "상태",
@@ -2495,7 +2535,7 @@ class Tfm2InstallerApp(tk.Tk):
             "mod_id": "mod_id",
             "version": "버전",
             "champions": "챔피언",
-            "workshop": "Workshop",
+            "source": "Source",
             "warnings": "주의",
         }
         widths = {
@@ -2504,7 +2544,7 @@ class Tfm2InstallerApp(tk.Tk):
             "mod_id": 130,
             "version": 70,
             "champions": 90,
-            "workshop": 110,
+            "source": 140,
             "warnings": 150,
         }
         for column in columns:
@@ -2541,7 +2581,7 @@ class Tfm2InstallerApp(tk.Tk):
                     row.mod_id,
                     row.version,
                     f"{len(row.champion_ids)}개",
-                    row.workshop_id,
+                    row.source_label,
                     ", ".join(warnings) if warnings else "-",
                 )
                 iid = str(index)
@@ -2566,7 +2606,7 @@ class Tfm2InstallerApp(tk.Tk):
                 game_dir = self.current_game_dir()
                 self.model.set_workshop_champion_mod_enabled(game_dir, row.mod_id, enabled)
                 compat_plan = self.model.sync_champion_view_compat(game_dir)
-                self.log(f"champion mod cleanup: {self.model.format_champion_view_compat_summary(compat_plan)}")
+                self.log(f"champion mod compat patch: {self.model.format_champion_view_compat_summary(compat_plan)}")
                 self.log(f"챔피언 모드 {action}: {row.mod_id}")
                 refresh_tree()
                 self.refresh_status()
@@ -2578,22 +2618,22 @@ class Tfm2InstallerApp(tk.Tk):
             try:
                 plan = self.model.sync_champion_view_compat(self.current_game_dir(), force=True)
                 summary = self.model.format_champion_view_compat_summary(plan)
-                self.log(f"champion mod cleanup rebuilt: {summary}")
+                self.log(f"champion mod compat patch rebuilt: {summary}")
                 refresh_tree()
                 self.refresh_status()
-                messagebox.showinfo("챔프 모드 안정화", f"호환 패치 잔재 정리를 완료했습니다.\n{summary}")
+                messagebox.showinfo("챔프 모드 안정화", f"호환 패치 적용을 완료했습니다.\n{summary}")
             except Exception as exc:
                 messagebox.showerror("챔프 모드 안정화", str(exc))
 
         def remove_compat():
-            if not messagebox.askyesno("챔프 모드 안정화", "TFM2.gg가 생성했던 호환 패치 잔재를 제거하고, 가능한 원본 override 상태로 되돌릴까요?"):
+            if not messagebox.askyesno("챔프 모드 안정화", "TFM2.gg가 적용했던 호환 패치를 제거하고, 가능한 원본 override 상태로 되돌릴까요?"):
                 return
             try:
                 self.model.remove_champion_view_compat(self.current_game_dir())
-                self.log("champion mod cleanup removed")
+                self.log("champion mod compat patch removed")
                 refresh_tree()
                 self.refresh_status()
-                messagebox.showinfo("챔프 모드 안정화", "호환 패치 잔재를 제거했습니다.")
+                messagebox.showinfo("챔프 모드 안정화", "호환 패치를 제거했습니다.")
             except Exception as exc:
                 messagebox.showerror("챔프 모드 안정화", str(exc))
 
@@ -2604,8 +2644,8 @@ class Tfm2InstallerApp(tk.Tk):
 
         btns = ttk.Frame(frame)
         btns.grid(row=3, column=0, columnspan=2, sticky="ew", pady=(12, 0))
-        ttk.Button(btns, text="잔재 정리", style="Accent.TButton", command=rebuild_compat).pack(side="left", padx=(0, 8))
-        ttk.Button(btns, text="패치 제거", command=remove_compat).pack(side="left", padx=(0, 8))
+        ttk.Button(btns, text="호환 패치", style="Accent.TButton", command=rebuild_compat).pack(side="left", padx=(0, 8))
+        ttk.Button(btns, text="호환 패치 제거", command=remove_compat).pack(side="left", padx=(0, 8))
         ttk.Button(btns, text="활성화", style="Primary.TButton", command=lambda: set_enabled(True)).pack(side="left")
         ttk.Button(btns, text="비활성화", style="Danger.TButton", command=lambda: set_enabled(False)).pack(side="left", padx=(8, 0))
         ttk.Button(btns, text="폴더 열기", command=open_folder).pack(side="left", padx=(8, 0))

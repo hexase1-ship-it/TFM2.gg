@@ -332,6 +332,16 @@ def workshop_content_dirs(game_root=ROOT):
     return [path for path in candidates if path.exists()]
 
 
+def local_mod_dirs(game_root=ROOT):
+    mods_dir = Path(game_root) / "mods"
+    if not mods_dir.exists():
+        return []
+    try:
+        return sorted(path for path in mods_dir.iterdir() if path.is_dir())
+    except OSError:
+        return []
+
+
 def find_workshop_mod_root(item_dir):
     direct = item_dir / "mod.mod_info"
     if direct.exists():
@@ -349,35 +359,44 @@ def find_workshop_mod_root(item_dir):
 
 def discover_workshop_champion_mods(game_root=ROOT):
     out = {}
+
+    def add_candidate(item_dir, source_type, source_id):
+        located = find_workshop_mod_root(item_dir)
+        if not located:
+            return
+        mod_root, info_path = located
+        info = load_json_file(info_path, {})
+        if not isinstance(info, dict):
+            return
+        mod_id = str(info.get("mod_id") or info.get("id") or "").strip()
+        if not mod_id or mod_id in out:
+            return
+        champion_dir = mod_root / "champion"
+        champion_files = sorted(champion_dir.glob("*.data_champion")) if champion_dir.exists() else []
+        if not champion_files:
+            return
+        out[mod_id] = {
+            "sourceType": source_type,
+            "sourceId": source_id,
+            "workshopId": source_id if source_type == "workshop" else None,
+            "modId": mod_id,
+            "name": info.get("name") or mod_id,
+            "version": info.get("version") or "-",
+            "author": info.get("author") or "-",
+            "path": str(mod_root),
+            "championFiles": champion_files,
+        }
+
+    for item_dir in local_mod_dirs(game_root):
+        add_candidate(item_dir, "local", item_dir.name)
+
     for content_dir in workshop_content_dirs(game_root):
         try:
             item_dirs = sorted(path for path in content_dir.iterdir() if path.is_dir())
         except OSError:
             continue
         for item_dir in item_dirs:
-            located = find_workshop_mod_root(item_dir)
-            if not located:
-                continue
-            mod_root, info_path = located
-            info = load_json_file(info_path, {})
-            if not isinstance(info, dict):
-                continue
-            mod_id = str(info.get("mod_id") or info.get("id") or "").strip()
-            if not mod_id:
-                continue
-            champion_dir = mod_root / "champion"
-            champion_files = sorted(champion_dir.glob("*.data_champion")) if champion_dir.exists() else []
-            if not champion_files:
-                continue
-            out[mod_id] = {
-                "workshopId": item_dir.name,
-                "modId": mod_id,
-                "name": info.get("name") or mod_id,
-                "version": info.get("version") or "-",
-                "author": info.get("author") or "-",
-                "path": str(mod_root),
-                "championFiles": champion_files,
-            }
+            add_candidate(item_dir, "workshop", item_dir.name)
     return out
 
 
@@ -811,7 +830,8 @@ def external_champion_payload(file_path, mod_meta, translations):
         "overall": None,
         "tier": "-",
         "modSource": {
-            "type": "workshop",
+            "type": mod_meta.get("sourceType") or "workshop",
+            "sourceId": mod_meta.get("sourceId"),
             "workshopId": mod_meta.get("workshopId"),
             "modId": mod_meta.get("modId"),
             "modName": mod_meta.get("name"),
@@ -845,6 +865,8 @@ def load_active_external_champions(champions, game_root=ROOT):
                 "modId": mod_id,
                 "name": mod_meta.get("name"),
                 "version": mod_meta.get("version"),
+                "sourceType": mod_meta.get("sourceType") or "workshop",
+                "sourceId": mod_meta.get("sourceId"),
                 "workshopId": mod_meta.get("workshopId"),
                 "champions": mod_champions,
             }
@@ -854,7 +876,7 @@ def load_active_external_champions(champions, game_root=ROOT):
 
 def is_external_workshop_champion(champ):
     source = champ.get("modSource") if isinstance(champ, dict) else None
-    return isinstance(source, dict) and source.get("type") == "workshop"
+    return isinstance(source, dict) and source.get("type") in {"workshop", "local"}
 
 
 def active_external_champion_ids(game_root=ROOT):
@@ -906,7 +928,8 @@ def split_policy_champions_for_current_mods(champions, game_root=ROOT):
                 "id": champion_id,
                 "name": champion_id,
                 "modSource": {
-                    "type": "workshop",
+                    "type": mod_meta.get("sourceType") or "workshop",
+                    "sourceId": mod_meta.get("sourceId"),
                     "workshopId": mod_meta.get("workshopId"),
                     "modId": mod_id,
                     "modName": mod_meta.get("name"),
