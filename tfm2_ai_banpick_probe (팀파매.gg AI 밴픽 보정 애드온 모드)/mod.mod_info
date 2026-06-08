@@ -3,11 +3,11 @@
   "dependencies": [
     {
       "mod_id": "base",
-      "version": ">=0.4.10"
+      "version": ">=0.4.11"
     }
   ],
   "description": "Adds dashboard-derived champion meta scores to native AI ban/pick scoring.",
-  "last_updated": "2026-06-05",
+  "last_updated": "2026-06-08",
   "mod_id": "tfm2_ai_banpick_probe",
   "name": "TFM2 AI Banpick Policy",
   "tags": [
@@ -16,5 +16,5 @@
     "Draft",
     "Meta"
   ],
-  "version": "0.3.0"
+  "version": "0.3.1"
 }

@@ -61,5 +61,5 @@ policy_file=champion_tier_policy.tsv
 ## 버전
 
 - 애드온 버전: 0.2.5
-- 대상 게임/SDK: Teamfight Manager 2 0.4.10
+- 대상 게임/SDK: Teamfight Manager 2 0.4.11
 - 구현 방식: 팀파매.gg 소스 기반 Rust 재구현

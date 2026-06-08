@@ -30,7 +30,7 @@ RELEASE_API = f"https://api.github.com/repos/{REPO_FULL_NAME}/releases/latest"
 RELEASE_ASSET_NAME = "TFM2.gg_Distribution.zip"
 RELEASE_PAGE_URL = f"https://github.com/{REPO_FULL_NAME}/releases/tag/latest"
 DIRECT_DOWNLOAD_URL = f"https://github.com/{REPO_FULL_NAME}/releases/download/latest/{RELEASE_ASSET_NAME}"
-TARGET_GAME_VERSION = "0.4.10"
+TARGET_GAME_VERSION = "0.4.11"
 STEAM_APP_ID = "3009300"
 PACKAGE_LAYOUT_VERSION = 4
 DASHBOARD_INSTALL_DIR_NAME = APP_NAME
@@ -70,8 +70,8 @@ CHAMPION_VIEW_ASSET_KEY = "asset/base/style/champion_view"
 SOURCE_DASHBOARD_DIR_NAME = "TFM2_Meta_Dashboard_v0.3.3 (팀파매.gg)"
 
 EXPECTED_GAME_FILES = {
-    "TeamfightManager2.exe": 63_949_824,
-    "bundle.game_data": 1_119_930_515,
+    "TeamfightManager2.exe": 64_445_440,
+    "bundle.game_data": 1_121_270_589,
 }
 CRITICAL_GAME_FILES = {"bundle.game_data"}
 

@@ -546,7 +546,7 @@ fn tier_label(tier: ChampionTier) -> &'static str {
 }
 
 fn init(_ctx: &GameCtx) -> ModRegistration {
-    log_line("mod: init 0.4.10 source meta champion tiers 0.2.5 one-shot policy apply");
+    log_line("mod: init 0.4.11 source meta champion tiers 0.2.6 one-shot policy apply");
     let mut reg = ModRegistration::new(MOD_ID);
     reg.set_extension(MetaTierClient);
     reg.set_server_extension(MetaTierServer);
