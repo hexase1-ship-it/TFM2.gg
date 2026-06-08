@@ -17,7 +17,7 @@ $targetDir = Join-Path $projectDir "target"
 function Find-SdkRoot {
     param([string]$StartDir)
 
-    $preferredVersion = "0.4.10"
+    $preferredVersion = "0.4.11"
     $cursor = (Resolve-Path -LiteralPath $StartDir).Path
     while ($cursor) {
         $sdkHome = Join-Path $cursor "2_Mod SDK"

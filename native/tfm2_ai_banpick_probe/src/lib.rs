@@ -608,7 +608,7 @@ fn clear_last_error() {
 }
 
 fn init(_ctx: &GameCtx) -> ModRegistration {
-    log_line("mod: init 0.4.10 source AI banpick policy");
+    log_line("mod: init 0.4.11 source AI banpick policy");
     let mut reg = ModRegistration::new(MOD_ID);
     reg.add_draft_score_hook(AiBanpickHook);
     reg

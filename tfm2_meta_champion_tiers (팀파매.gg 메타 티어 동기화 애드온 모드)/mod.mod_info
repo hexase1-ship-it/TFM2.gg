@@ -3,7 +3,7 @@
   "dependencies": [
     {
       "mod_id": "base",
-      "version": ">=0.4.10"
+      "version": ">=0.4.11"
     }
   ],
   "description": "Applies TeamParmae.gg latest-patch worldwide tournament champion tiers to in-game team champion tier data.",
@@ -16,5 +16,5 @@
     "Tier",
     "TeamParmae"
   ],
-  "version": "0.2.5"
+  "version": "0.2.6"
 }
