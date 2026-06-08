@@ -2212,12 +2212,14 @@ class Tfm2InstallerApp(tk.Tk):
         )
         self.style.map("Refresh.TButton", background=[("active", "#bfdbfe"), ("pressed", "#93c5fd")])
         self.style.configure("TEntry", padding=(8, 6), fieldbackground="#ffffff", bordercolor="#cbd5e1", lightcolor="#cbd5e1", darkcolor="#cbd5e1")
+        self.style.configure("TNotebook", background=bg, borderwidth=0)
+        self.style.configure("TNotebook.Tab", font=("Malgun Gothic", 10), padding=(14, 7))
 
     def create_widgets(self):
         outer = ttk.Frame(self, padding=22)
         outer.pack(fill="both", expand=True)
         outer.columnconfigure(0, weight=1)
-        outer.rowconfigure(4, weight=1, minsize=170)
+        outer.rowconfigure(4, weight=1, minsize=230)
 
         header = ttk.Frame(outer)
         header.grid(row=0, column=0, sticky="ew")
@@ -2269,8 +2271,9 @@ class Tfm2InstallerApp(tk.Tk):
         body.grid(row=4, column=0, sticky="nsew")
         body.columnconfigure(0, weight=1)
         body.rowconfigure(0, weight=1)
-        log_card = ttk.Frame(body, style="Card.TFrame", padding=14)
-        log_card.grid(row=0, column=0, sticky="nsew")
+        notebook = ttk.Notebook(body)
+        notebook.grid(row=0, column=0, sticky="nsew")
+        log_card = ttk.Frame(notebook, style="Card.TFrame", padding=14)
         log_card.columnconfigure(0, weight=1)
         log_card.rowconfigure(1, weight=1)
         ttk.Label(log_card, text="작업 로그", style="CardTitle.TLabel").grid(row=0, column=0, sticky="w", pady=(0, 8))
@@ -2290,6 +2293,30 @@ class Tfm2InstallerApp(tk.Tk):
         log_scroll = ttk.Scrollbar(log_card, orient="vertical", command=self.log_text.yview)
         self.log_text.configure(yscrollcommand=log_scroll.set)
         log_scroll.grid(row=1, column=1, sticky="ns")
+        notebook.add(log_card, text="작업 로그")
+
+        detail_card = ttk.Frame(notebook, style="Card.TFrame", padding=14)
+        detail_card.columnconfigure(0, weight=1)
+        detail_card.rowconfigure(1, weight=1)
+        ttk.Label(detail_card, text="상태 상세", style="CardTitle.TLabel").grid(row=0, column=0, sticky="w", pady=(0, 8))
+        self.status_detail_text = tk.Text(
+            detail_card,
+            height=9,
+            bg="#ffffff",
+            fg="#1f2937",
+            insertbackground="#1f2937",
+            relief="flat",
+            padx=12,
+            pady=10,
+            font=("Malgun Gothic", 9),
+            wrap="word",
+            state="disabled",
+        )
+        self.status_detail_text.grid(row=1, column=0, sticky="nsew")
+        detail_scroll = ttk.Scrollbar(detail_card, orient="vertical", command=self.status_detail_text.yview)
+        self.status_detail_text.configure(yscrollcommand=detail_scroll.set)
+        detail_scroll.grid(row=1, column=1, sticky="ns")
+        notebook.add(detail_card, text="상태 상세")
 
         footer = ttk.Frame(outer)
         footer.grid(row=5, column=0, sticky="ew", pady=(12, 0))
@@ -2309,6 +2336,12 @@ class Tfm2InstallerApp(tk.Tk):
         stamp = time.strftime("%H:%M:%S")
         self.log_text.insert("end", f"[{stamp}] {message}\n")
         self.log_text.see("end")
+
+    def set_status_detail(self, text: str):
+        self.status_detail_text.configure(state="normal")
+        self.status_detail_text.delete("1.0", "end")
+        self.status_detail_text.insert("1.0", text)
+        self.status_detail_text.configure(state="disabled")
 
     def choose_game_dir(self):
         initial = self.game_dir_var.get() or str(DEFAULT_GAME_DIR)
@@ -2350,7 +2383,20 @@ class Tfm2InstallerApp(tk.Tk):
         backup = installed.get("backup") or {}
         shell_state = "설치됨" if installed["dashboardShellInstalled"] else "없음"
         dashboard_state = "설치됨" if installed["dashboardInstalled"] else "없음"
-        install_lines = [
+        installed_addon_count = sum(1 for row in installed["addons"].values() if row["installed"])
+        compat_summary = installed["championViewCompat"]["summary"]
+        compat_short = "정상"
+        lower_compat = str(compat_summary).lower()
+        if "needed" in lower_compat or "failed" in lower_compat:
+            compat_short = "확인 필요"
+        elif "applied" in lower_compat:
+            compat_short = "적용됨"
+        install_summary_lines = [
+            f"구조: {installed['layoutStatus']}",
+            f"대시보드: {shell_state} / 애드온 {installed_addon_count}/{len(ADDON_PACKAGES)}",
+            f"정책: {'있음' if policy_ok else '없음'} / 챔프 호환 {compat_short}",
+        ]
+        detail_lines = [
             f"챔프 호환: {installed['championViewCompat']['summary']}",
             f"실행/대시보드: {shell_state} / {dashboard_state}",
             f"설치 구조: {installed['layoutStatus']}",
@@ -2363,7 +2409,8 @@ class Tfm2InstallerApp(tk.Tk):
             f"백업: {backup.get('count', 0)}개 / {format_bytes(int(backup.get('size') or 0))}",
             f"메타 생성: {installed['coreGeneratedAt']}",
         ]
-        self.install_card_var.set("\n".join(install_lines))
+        self.install_card_var.set("\n".join(install_summary_lines))
+        self.set_status_detail("\n".join(detail_lines))
         self.update_card_var.set(
             f"패키지: {installed['packageVersion']}\n"
             f"레이아웃: {installed['layoutVersion'] or '-'}\n"
