@@ -44,7 +44,9 @@ function Write-FailAndExit($message, $exitCode = 1) {
     Write-Host $message -ForegroundColor Red
     Write-Host "Log file:"
     Write-Host $logPath
-    Read-Host "Press Enter to exit"
+    if (-not $NoPrompt) {
+        Read-Host "Press Enter to exit"
+    }
     exit $exitCode
 }
 
@@ -471,7 +473,9 @@ if (-not [string]::IsNullOrWhiteSpace($manualSavePath)) {
         Write-Host ""
         Write-Host "Save: $manualSavePath"
     } else {
-        Write-FailAndExit "No save file was auto-detected." 1
+        Write-Host ""
+        Write-Host "No save file was auto-detected; refreshing from an existing diagnostic snapshot if available." -ForegroundColor Yellow
+        $manualSavePath = ""
     }
 } else {
     Write-Host ""
@@ -495,7 +499,7 @@ if ([string]::IsNullOrWhiteSpace($manualSavePath) -and $saveFiles.Count -gt 0) {
     } else {
         $manualSavePath = $answer.Trim()
     }
-} elseif ([string]::IsNullOrWhiteSpace($manualSavePath)) {
+} elseif (-not $NoPrompt -and [string]::IsNullOrWhiteSpace($manualSavePath)) {
     Write-Host "No save file was auto-detected."
     Write-Host "Paste a save file path or the game's AppData data folder."
     Write-Host "Example: C:\Users\YOURNAME\AppData\Roaming\TeamSamoyed\TeamfightManager2\data"

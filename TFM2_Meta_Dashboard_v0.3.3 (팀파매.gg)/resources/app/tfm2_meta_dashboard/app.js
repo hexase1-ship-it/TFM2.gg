@@ -1793,12 +1793,36 @@ function metaExportReason() {
 }
 
 function metaExportIsWaiting(reason = metaExportReason()) {
-  return ["no_export_data", "export_dir_missing"].includes(reason);
+  const text = String(reason || "");
+  return ["no_export_data", "export_dir_missing", "export_data_without_manifest"].includes(text)
+    || text.startsWith("stale_export_files");
 }
 
 function metaExportHasHardError() {
   const reason = metaExportReason();
   return DATA.sources.metaExportUsable === false && Boolean(reason) && !metaExportIsWaiting(reason);
+}
+
+function metaExportStatusLabel({ incompatible, waiting, mismatched, replayLookupMissing, saveProbeActive }) {
+  if (incompatible) {
+    return "통계 수집 오류";
+  }
+  if (waiting) {
+    return "통계 수집 대기 중";
+  }
+  if (mismatched) {
+    return "세이브/통계 불일치";
+  }
+  if (replayLookupMissing) {
+    return "리플레이 이름 재수집 필요";
+  }
+  if (DATA.sources.metaExporter) {
+    return "Meta Exporter 통계 사용 중";
+  }
+  if (saveProbeActive) {
+    return "Save Probe 통계 사용 중";
+  }
+  return "통계 수집 전";
 }
 
 function renderSummary(champs) {
@@ -1831,19 +1855,13 @@ function renderSummary(champs) {
   const replayLookupMissing = Boolean(DATA.sources.metaExporter && !DATA.sources.exactReplayAthleteNames);
   const snapshotActive = DATA.sources.metaExporter || saveProbeActive;
   document.getElementById("exportStatus").className = `pill ${snapshotActive && !exportMismatched && !exportIncompatible && !replayLookupMissing ? "ok" : "warn"}`;
-  document.getElementById("exportStatus").textContent = exportIncompatible
-    ? "Meta Exporter 호환 오류"
-    : exportWaiting
-    ? "Meta Exporter 대기 중"
-    : exportMismatched
-    ? "세이브/Exporter 불일치"
-    : replayLookupMissing
-      ? "리플레이 이름 재수집 필요"
-    : DATA.sources.metaExporter
-      ? "Meta Exporter 통계 사용 중"
-    : saveProbeActive
-      ? "Save Probe 세이브 데이터 사용 중"
-      : "Meta Exporter 실행 전";
+  document.getElementById("exportStatus").textContent = metaExportStatusLabel({
+    incompatible: exportIncompatible,
+    waiting: exportWaiting,
+    mismatched: exportMismatched,
+    replayLookupMissing,
+    saveProbeActive,
+  });
   document.getElementById("sampleStatus").className = "pill";
   document.getElementById("sampleStatus").textContent = `생성 ${DATA.generatedAt}`;
 }
@@ -3095,11 +3113,11 @@ function renderMatchView() {
   const allRows = DATA.matchAnalysis || [];
   if (!allRows.length) {
     if (metaExportHasHardError()) {
-      container.innerHTML = `<p class="notice warning-notice">Meta Exporter 또는 Save Probe가 현재 게임 DB 구조 일부와 맞지 않아 예전 리플레이 export 파일을 무시했어. 최신 진단 도구가 정상 추출될 때까지 신규 경기 분석은 제한될 수 있어.</p>`;
+      container.innerHTML = `<p class="notice warning-notice">현재 진단 스냅샷을 통계로 사용할 수 없어. 대시보드를 다시 실행하거나 세이브를 한 번 저장한 뒤 자동 갱신을 기다려줘. 계속 반복되면 _last_refresh_log.txt의 Save Probe 오류를 확인해야 해.</p>`;
       return;
     }
     if (DATA.sources.metaExportUsable === false && metaExportIsWaiting()) {
-      container.innerHTML = `<p class="notice">Meta Exporter 통계가 아직 수집되지 않았어. 새 게임이거나 경기를 아직 진행하지 않은 상태라면 정상이고, 게임에서 경기를 진행한 뒤 대시보드를 새로고침하면 리플레이 분석이 채워져.</p>`;
+      container.innerHTML = `<p class="notice">아직 수집된 리플레이 통계가 없어. 새 게임이거나 경기를 아직 진행하지 않은 상태라면 정상이고, 게임에서 세이브를 저장하면 대시보드가 Save Probe로 자동 갱신해.</p>`;
       return;
     }
     if (DATA.sources.saveProbe) {

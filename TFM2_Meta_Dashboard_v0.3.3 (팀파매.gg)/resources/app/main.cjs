@@ -724,6 +724,56 @@ function defaultSaveDir() {
   return fs.existsSync(candidate) ? candidate : undefined;
 }
 
+function candidateSaveDirs() {
+  const dirs = [];
+  const appData = process.env.APPDATA;
+  const userProfile = process.env.USERPROFILE;
+  if (appData) {
+    dirs.push(path.join(appData, "TeamSamoyed", "TeamfightManager2", "data"));
+    dirs.push(path.join(appData, "TeamSamoyed", "Teamfight Manager2", "data"));
+  }
+  if (userProfile) {
+    dirs.push(path.join(userProfile, "AppData", "Roaming", "TeamSamoyed", "TeamfightManager2", "data"));
+    dirs.push(path.join(userProfile, "AppData", "Roaming", "TeamSamoyed", "Teamfight Manager2", "data"));
+  }
+  return [...new Set(dirs)];
+}
+
+function collectSaveFiles(root, depth = 0) {
+  if (!root || depth > 4 || !fs.existsSync(root)) {
+    return [];
+  }
+  const found = [];
+  let entries = [];
+  try {
+    entries = fs.readdirSync(root, { withFileTypes: true });
+  } catch {
+    return found;
+  }
+  for (const entry of entries) {
+    const fullPath = path.join(root, entry.name);
+    if (entry.isFile() && entry.name.toLowerCase().endsWith(".data")) {
+      try {
+        found.push({ path: fullPath, stat: fs.statSync(fullPath) });
+      } catch {
+        // Ignore files that are still being written or cannot be statted.
+      }
+    } else if (entry.isDirectory()) {
+      found.push(...collectSaveFiles(fullPath, depth + 1));
+    }
+  }
+  return found;
+}
+
+function latestSaveFile() {
+  const saves = [];
+  for (const dir of candidateSaveDirs()) {
+    saves.push(...collectSaveFiles(dir));
+  }
+  saves.sort((a, b) => b.stat.mtimeMs - a.stat.mtimeMs);
+  return saves.length ? saves[0].path : null;
+}
+
 async function selectSaveFile() {
   const result = await dialog.showOpenDialog(mainWindow, {
     title: "Teamfight Manager 2 세이브 파일 선택",
@@ -792,11 +842,12 @@ function runRefresh() {
       "Bypass",
       "-File",
       refreshScript,
-      "-SavePath",
-      savePath,
       "-NoPrompt",
       "-SkipLiveExporter"
     ];
+    if (savePath) {
+      args.splice(5, 0, "-SavePath", savePath);
+    }
     const child = spawn("powershell.exe", args, {
       cwd: dashboardDir,
       windowsHide: true,
@@ -840,7 +891,7 @@ async function refreshDashboard({ initial = false, changedAt = null } = {}) {
     await runRefresh();
     refreshCount += 1;
     lastRefreshAt = nowEpoch();
-    lastSnapshot = saveSnapshot(savePath);
+    lastSnapshot = savePath ? saveSnapshot(savePath) : null;
     writeAutoRefreshStatus(initial ? "watching" : "updated", "dashboard data refreshed", {
       lastChangeAt: changedAt
     });
@@ -919,6 +970,22 @@ async function main() {
   createWindow();
   createAppMenu();
   console.log(`Game root: ${gameRoot}`);
+  savePath = latestSaveFile();
+  if (savePath) {
+    console.log(`Auto save: ${savePath}`);
+  }
+  writeAutoRefreshStatus(
+    "refreshing",
+    savePath ? "auto-detected save; refreshing dashboard data" : "no save found; refreshing existing snapshot"
+  );
+  await refreshDashboard({ initial: true });
+  if (savePath) {
+    startWatchingSave();
+  }
+  setTimeout(() => {
+    checkForUpdatesOnStartup();
+  }, 1200);
+  return;
   writeAutoRefreshStatus("idle", "File > Save 선택... 에서 세이브를 선택하세요.");
   await mainWindow.loadFile(path.join(dashboardDir, "index.html"));
   setTimeout(() => {

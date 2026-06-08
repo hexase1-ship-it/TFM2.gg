@@ -4969,6 +4969,23 @@ def resolve_meta_export_dir(save_path):
     return EXPORT_DIR, primary_status, None
 
 
+def match_analysis_source_label(meta_export_status, save_probe_active=False):
+    if meta_export_status.get("usable"):
+        source = "save_probe" if save_probe_active else "meta_exporter"
+        return (
+            f"{source}: match_replays.debug.txt raw MatchReplayData; "
+            "team/player names prefer teams.debug.txt and athletes.debug.txt from the same diagnostic snapshot"
+        )
+    reason = str(meta_export_status.get("reason") or "")
+    if reason in {"no_export_data", "export_dir_missing"}:
+        return "waiting: no Meta Exporter or Save Probe diagnostic snapshot has been collected yet"
+    if reason.startswith("stale_export_files"):
+        return f"waiting: stale diagnostic files ignored ({reason})"
+    if reason == "export_data_without_manifest":
+        return "waiting: diagnostic files exist but manifest.tsv is missing"
+    return f"disabled: current diagnostic snapshot could not be used ({reason})"
+
+
 def latest_meta_export_timestamp():
     paths = [
         EXPORT_DIR / "manifest.tsv",
@@ -5928,7 +5945,7 @@ def main():
             "teamLookupSource": team_lookup_source,
             "athleteLookupSource": athlete_lookup_source,
             "exactReplayAthleteNames": athlete_lookup_source in {"meta_exporter", "save_probe"},
-            "matchAnalysisSource": "match_replays.debug.txt raw MatchReplayData; team/player names prefer teams.debug.txt and athletes.debug.txt from the same Meta Exporter snapshot" if meta_export_status["usable"] else "disabled: current Meta Exporter snapshot is incompatible, so stale replay debug files were ignored",
+            "matchAnalysisSource": match_analysis_source_label(meta_export_status, save_probe_active),
             "matchAnalysisDateSource": replay_date_status.get("source"),
             "itemCatalogSource": item_catalog.get("source"),
             "itemCatalogItems": len(item_catalog.get("byId", {})),
