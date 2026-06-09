@@ -4612,11 +4612,14 @@ class RelationAccumulator:
         return {
             "groups": self.groups,
             "pairs": relation_table(self.synergy, reverse=True),
-            "counters": relation_table(self.counter, reverse=False),
+            "counters": relation_table(self.counter, reverse=False, balanced=True),
         }
 
 
-def relation_table(source, reverse):
+RELATION_TABLE_LIMIT = 12
+
+
+def relation_table(source, reverse, balanced=False):
     out = {}
     for champ, counters in source.items():
         rows = []
@@ -4645,7 +4648,27 @@ def relation_table(source, reverse):
             ),
             reverse=True,
         )
-        out[champ] = rows[:12]
+        if balanced:
+            easiest = sorted(
+                rows,
+                key=lambda row: (
+                    row["winRate"],
+                    min(row["games"], 30),
+                    row["games"],
+                ),
+                reverse=True,
+            )[:RELATION_TABLE_LIMIT]
+            selected = []
+            seen = set()
+            for row in rows[:RELATION_TABLE_LIMIT] + easiest:
+                champion = row["champion"]
+                if champion in seen:
+                    continue
+                seen.add(champion)
+                selected.append(row)
+            out[champ] = selected
+        else:
+            out[champ] = rows[:RELATION_TABLE_LIMIT]
     return out
 
 
@@ -5399,7 +5422,7 @@ def merge_relation_kind(kind, payloads, reverse):
                 other = row["champion"]
                 merged[champ][other]["games"] += row.get("games", row.get("count", 0))
                 merged[champ][other]["wins"] += row.get("wins", 0)
-    return relation_table(merged, reverse=reverse)
+    return relation_table(merged, reverse=reverse, balanced=kind == "counters")
 
 
 def parse_args():
