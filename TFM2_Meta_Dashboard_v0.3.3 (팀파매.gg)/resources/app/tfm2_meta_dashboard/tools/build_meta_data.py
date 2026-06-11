@@ -6008,7 +6008,7 @@ def main():
 
     write_text_atomic(
         OUT,
-        "window.TFM2_META_DATA = " + json.dumps(payload, ensure_ascii=False, indent=2) + ";\n",
+        "window.TFM2_META_DATA = " + json.dumps(payload, ensure_ascii=False, separators=(",", ":")) + ";\n",
     )
     core_item_build_paths = write_core_item_builds(core_item_builds)
     print(f"Wrote {OUT}")
